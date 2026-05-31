@@ -208,6 +208,7 @@ impl BluetoothBackend for BtleplugBackend {
                 .into_iter()
                 .map(|(company, data)| (CompanyId(company), data))
                 .collect();
+            info.services = props.services.iter().map(|u| u.to_string()).collect();
 
             if !filter.accepts(&info) {
                 continue;

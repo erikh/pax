@@ -220,6 +220,9 @@ impl BlueZBackend {
         if let Some(class) = dev.class().await.map_err(map_err)? {
             info.class = Some(pax_core::ClassOfDevice::new(class));
         }
+        if let Ok(Some(uuids)) = dev.uuids().await {
+            info.services = uuids.iter().map(|u| u.to_string()).collect();
+        }
         Ok(info)
     }
 

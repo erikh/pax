@@ -207,6 +207,8 @@ pub struct DeviceInfo {
     /// the peer's platform (e.g. Apple's company id marks Apple devices); see
     /// [`crate::peer::PeerPlatform`].
     pub manufacturer_data: Vec<(crate::hardware::CompanyId, Vec<u8>)>,
+    /// Advertised / known service UUIDs, as strings (e.g. `"0000110a-0000-..."`).
+    pub services: Vec<String>,
 }
 
 impl DeviceInfo {
@@ -246,12 +248,76 @@ impl DeviceInfo {
         self
     }
 
+    /// Builder-style setter for one advertised service UUID.
+    pub fn with_service(mut self, uuid: impl Into<String>) -> Self {
+        self.services.push(uuid.into());
+        self
+    }
+
     /// The best human label available: the name if known, else the address.
     pub fn label(&self) -> String {
         match &self.name {
             Some(n) => format!("{n} [{}]", self.id),
             None => self.id.to_string(),
         }
+    }
+
+    /// A detailed, multi-line, human-readable dump of everything known about this
+    /// device — address, inferred platform, signal, Class-of-Device, bond state,
+    /// vendor data (with company names), and service UUIDs. Fields that are unknown
+    /// are omitted. Pairs with [`crate::peer::detect_platform`].
+    ///
+    /// ```
+    /// use pax_core::{DeviceId, DeviceInfo, ClassOfDevice, CompanyId};
+    /// let id: DeviceId = "11:22:33:44:55:66".parse().unwrap();
+    /// let dump = DeviceInfo::new(id)
+    ///     .with_name("Pixel 8")
+    ///     .with_rssi(-57)
+    ///     .with_class(ClassOfDevice::new(0x5A_02_0C))
+    ///     .dump();
+    /// assert!(dump.contains("11:22:33:44:55:66"));
+    /// assert!(dump.contains("Pixel 8"));
+    /// assert!(dump.contains("Android"));   // inferred platform
+    /// assert!(dump.contains("-57 dBm"));
+    /// ```
+    pub fn dump(&self) -> String {
+        use core::fmt::Write as _;
+        let mut s = String::new();
+        let _ = writeln!(s, "Device {}", self.id);
+
+        let mut line = |label: &str, value: &str| {
+            let _ = writeln!(s, "  {label:<13}{value}");
+        };
+
+        if let Some(name) = &self.name {
+            line("name:", name);
+        }
+        let platform = crate::peer::detect_platform(self);
+        if platform != crate::peer::PeerPlatform::Unknown {
+            line("platform:", platform.label());
+        }
+        if let Some(rssi) = self.rssi {
+            line("rssi:", &format!("{rssi} dBm"));
+        }
+        if let Some(tx) = self.tx_power {
+            line("tx power:", &format!("{tx} dBm"));
+        }
+        if let Some(cod) = self.class {
+            line("class:", &format!("0x{:06X} ({})", cod.0, cod.major()));
+        }
+        line("paired:", if self.paired { "yes" } else { "no" });
+        line("connected:", if self.connected { "yes" } else { "no" });
+        for (company, data) in &self.manufacturer_data {
+            let hex: Vec<String> = data.iter().map(|b| format!("{b:02X}")).collect();
+            line(
+                "vendor data:",
+                &format!("{company} (0x{:04X}): {}", company.0, hex.join(" ")),
+            );
+        }
+        for uuid in &self.services {
+            line("service:", uuid);
+        }
+        s
     }
 
     /// Best-effort guess of the peer's platform from the advertised data.

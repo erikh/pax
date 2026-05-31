@@ -227,6 +227,29 @@ You asked to split "by specification of Bluetooth and 802.1x in general", so the
 A link therefore carries a [`StandardsProfile`] of *both* a radio standard and a
 port-auth state, and you can split on either.
 
+### Inventory: dump every device in range
+
+One async call scans and returns a detailed, human-readable dump of every nearby
+device — address, inferred platform (Android/iPhone/…), signal, Class-of-Device,
+bond state, vendor data (by company name), and service UUIDs:
+
+```rust,ignore
+let report = pax_transport::dump_in_range(&backend, &DiscoveryFilter::new()).await?;
+println!("{report}");
+// === 7 device(s) in range ===
+//
+// Device 11:22:33:44:55:66
+//   name:        Erik's iPhone
+//   platform:    iPhone/iOS
+//   rssi:        -55 dBm
+//   class:       0x7A020C (phone)
+//   vendor data: Apple, Inc. (0x004C): 10 05
+//   service:     0000180a-0000-1000-8000-00805f9b34fb
+```
+
+Per-device, [`DeviceInfo::dump`] gives the same; for structured output, the
+`DeviceInfo`s are `serde`-serializable (with the `pax-core/serde` feature).
+
 ---
 
 ## Backends (real hardware)

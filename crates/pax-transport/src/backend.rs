@@ -420,6 +420,42 @@ pub trait BluetoothBackend: Send + Sync {
     }
 }
 
+/// Scan for **every device in range** and return a detailed, human-readable dump
+/// of each — address, inferred platform, signal, Class-of-Device, bond state,
+/// vendor data, and service UUIDs (via [`DeviceInfo::dump`](pax_core::DeviceInfo::dump)).
+///
+/// This is async — it runs a real discovery on the backend. Pass
+/// [`DiscoveryFilter::new`] to dump everything, or a filter to narrow it. For
+/// structured output instead of text, iterate [`BluetoothBackend::discover`] and
+/// serialize the [`DeviceInfo`]s (they are `serde` with the `pax-core/serde` feature).
+///
+/// ```
+/// use pax_transport::{dump_in_range, DiscoveryFilter, mock::{MockBackend, MockDevice}};
+/// use pax_core::DeviceId;
+///
+/// # async fn run() -> Result<(), pax_transport::TransportError> {
+/// let id: DeviceId = "11:22:33:44:55:66".parse().unwrap();
+/// let backend = MockBackend::builder()
+///     .device(MockDevice::new(id, "Pixel 8").with_rssi(-57))
+///     .build();
+/// let report = dump_in_range(&backend, &DiscoveryFilter::new()).await?;
+/// assert!(report.contains("1 device(s) in range"));
+/// assert!(report.contains("Pixel 8"));
+/// # Ok(()) }
+/// ```
+pub async fn dump_in_range(
+    backend: &dyn BluetoothBackend,
+    filter: &DiscoveryFilter,
+) -> Result<String> {
+    let devices = backend.discover(filter).await?;
+    let mut out = format!("=== {} device(s) in range ===\n", devices.len());
+    for device in &devices {
+        out.push('\n');
+        out.push_str(&device.dump());
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

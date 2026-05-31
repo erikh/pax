@@ -145,6 +145,29 @@ impl MockDevice {
         self
     }
 
+    /// Builder: set the advertised Class-of-Device.
+    pub fn with_class(mut self, class: pax_core::ClassOfDevice) -> Self {
+        self.info = self.info.with_class(class);
+        self
+    }
+
+    /// Builder: add a manufacturer-data entry (e.g. an Apple company id, so the
+    /// device dumps/detects as an iPhone).
+    pub fn with_manufacturer_data(
+        mut self,
+        company: pax_core::CompanyId,
+        data: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.info = self.info.with_manufacturer_data(company, data);
+        self
+    }
+
+    /// Builder: add an advertised service UUID (string form).
+    pub fn with_service(mut self, uuid: impl Into<String>) -> Self {
+        self.info = self.info.with_service(uuid);
+        self
+    }
+
     /// Builder: set the spec context.
     pub fn with_spec(mut self, spec: SpecContext) -> Self {
         self.spec = spec;
@@ -835,5 +858,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bonded, vec![a]);
+    }
+
+    #[tokio::test]
+    async fn dump_in_range_reports_every_device() {
+        use crate::backend::{dump_in_range, DiscoveryFilter};
+        use pax_core::{ClassOfDevice, CompanyId};
+
+        let iphone: DeviceId = "AA:00:00:00:00:01".parse().unwrap();
+        let pixel: DeviceId = "BB:00:00:00:00:02".parse().unwrap();
+        let backend = MockBackend::builder()
+            .device(
+                MockDevice::new(iphone, "Erik's iPhone")
+                    .with_rssi(-55)
+                    .with_class(ClassOfDevice::new(0x7A_02_0C))
+                    .with_manufacturer_data(CompanyId::APPLE, vec![0x10, 0x05])
+                    .with_service("0000110a-0000-1000-8000-00805f9b34fb"),
+            )
+            .device(MockDevice::new(pixel, "Pixel 8").with_rssi(-70))
+            .build();
+
+        let report = dump_in_range(&backend, &DiscoveryFilter::new())
+            .await
+            .unwrap();
+
+        assert!(report.contains("2 device(s) in range"));
+        // The iPhone: name, inferred platform, signal, vendor data, service.
+        assert!(report.contains("Erik's iPhone"));
+        assert!(report.contains("iPhone/iOS"));
+        assert!(report.contains("-55 dBm"));
+        assert!(report.contains("Apple, Inc. (0x004C): 10 05"));
+        assert!(report.contains("0000110a-"));
+        // The Pixel: name + Android platform inferred from Class-of-Device.
+        assert!(report.contains("Pixel 8"));
+        assert!(report.contains("Android"));
     }
 }

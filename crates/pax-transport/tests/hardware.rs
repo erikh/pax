@@ -64,6 +64,24 @@ mod bluez_hw {
         }
     }
 
+    /// Dump detailed info for every device in range (read-only).
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires a real Bluetooth adapter; set PAX_HW_TESTS=1"]
+    async fn dump_devices_in_range() {
+        if !hw_enabled() {
+            return;
+        }
+        let backend = BlueZBackend::open()
+            .await
+            .expect("open default adapter")
+            .with_discovery_window(std::time::Duration::from_secs(4));
+        let report = pax_transport::dump_in_range(&backend, &DiscoveryFilter::new().limit(30))
+            .await
+            .expect("dump");
+        println!("{report}");
+        assert!(report.contains("device(s) in range"));
+    }
+
     /// Inbound "broadcast" pairing mode: make this adapter discoverable + pairable
     /// and accept bonds from devices that pair *to* it. Pair a phone to the laptop
     /// while this runs. Window seconds come from `PAX_HW_PAIR_WINDOW` (default 20).
