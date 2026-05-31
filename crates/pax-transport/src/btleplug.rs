@@ -178,9 +178,13 @@ impl BluetoothBackend for BtleplugBackend {
 
         let mut out = Vec::new();
         for p in peripherals {
-            let props = match p.properties().await.map_err(map_err)? {
-                Some(props) => props,
-                None => continue,
+            // Reading one peripheral's properties can fail transiently (a device
+            // disappeared mid-scan, or a backend/D-Bus quirk on some platforms).
+            // Skip that device rather than abandoning the whole scan.
+            let props = match p.properties().await {
+                Ok(Some(props)) => props,
+                Ok(None) => continue,
+                Err(_) => continue,
             };
             let addr_type = match props.address_type {
                 Some(btleplug::api::AddressType::Public) => AddressType::Public,

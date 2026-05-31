@@ -42,7 +42,7 @@ serde = { version = "1", features = ["derive"] }
 # (D-Bus development headers on Linux); see the README.
 # `bluetoothd` is the feature that exposes Session/Adapter/Device/agent over D-Bus.
 bluer = { version = "0.17", features = ["bluetoothd"] }
-btleplug = "0.11"
+btleplug = "0.12"
 # Pure-Rust D-Bus (no libdbus needed) for talking to obexd / NetworkManager.
 # Pinned to 4.x to keep the 1.75 MSRV; the `tokio` feature shares our runtime.
 zbus = { version = "4.4", default-features = false, features = ["tokio"] }
