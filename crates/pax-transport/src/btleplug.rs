@@ -195,6 +195,13 @@ impl BluetoothBackend for BtleplugBackend {
             info.rssi = props.rssi;
             info.tx_power = props.tx_power_level;
             info.connected = p.is_connected().await.unwrap_or(false);
+            // Carry manufacturer data so `info.platform()` can tell an iPhone from
+            // an Android device (Apple's company id is the key signal).
+            info.manufacturer_data = props
+                .manufacturer_data
+                .into_iter()
+                .map(|(company, data)| (CompanyId(company), data))
+                .collect();
 
             if !filter.accepts(&info) {
                 continue;

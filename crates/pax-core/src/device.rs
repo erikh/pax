@@ -203,6 +203,10 @@ pub struct DeviceInfo {
     pub paired: bool,
     /// Whether there is a live connection right now.
     pub connected: bool,
+    /// LE "manufacturer specific data" entries, `(company, bytes)`. Used to infer
+    /// the peer's platform (e.g. Apple's company id marks Apple devices); see
+    /// [`crate::peer::PeerPlatform`].
+    pub manufacturer_data: Vec<(crate::hardware::CompanyId, Vec<u8>)>,
 }
 
 impl DeviceInfo {
@@ -226,12 +230,34 @@ impl DeviceInfo {
         self
     }
 
+    /// Builder-style setter for the Class-of-Device.
+    pub fn with_class(mut self, class: ClassOfDevice) -> Self {
+        self.class = Some(class);
+        self
+    }
+
+    /// Builder-style setter for one manufacturer-data entry.
+    pub fn with_manufacturer_data(
+        mut self,
+        company: crate::hardware::CompanyId,
+        data: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.manufacturer_data.push((company, data.into()));
+        self
+    }
+
     /// The best human label available: the name if known, else the address.
     pub fn label(&self) -> String {
         match &self.name {
             Some(n) => format!("{n} [{}]", self.id),
             None => self.id.to_string(),
         }
+    }
+
+    /// Best-effort guess of the peer's platform from the advertised data.
+    /// Convenience for [`crate::peer::detect_platform`].
+    pub fn platform(&self) -> crate::peer::PeerPlatform {
+        crate::peer::detect_platform(self)
     }
 }
 

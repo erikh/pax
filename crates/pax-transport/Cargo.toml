@@ -25,6 +25,7 @@ uuid = { workspace = true, optional = true }
 zbus = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 pax-hci = { workspace = true, optional = true }
+jni = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Tests drive the async trait on a single-threaded runtime; no hardware needed.
@@ -38,11 +39,20 @@ bluez = ["dep:bluer", "dep:tokio", "dep:futures", "dep:zbus", "dep:libc", "dep:p
 ## Enable the cross-platform BLE backend (via `btleplug`). BLE-only: it can scan,
 ## connect, and exchange GATT data, but cannot do Classic OBEX file push.
 btleplug = ["dep:btleplug", "dep:tokio", "dep:futures", "dep:uuid"]
-## Convenience: turn on every real backend available on this platform.
+## Convenience: turn on every desktop backend available on this platform.
 all-backends = ["bluez", "btleplug"]
 ## A best-effort `StandardsResolver` that reads 802.1X / PAN auth state from
 ## NetworkManager (Linux system bus). Builds on the `bluez` feature's `zbus`.
 port-auth-nm = ["bluez"]
+## The Android backend (JNI to `android.bluetooth`). Full: BLE + Classic bonding
+## + RFCOMM + OBEX Object Push. Build for an Android target with the NDK; the
+## library must be embedded in an app that hands it a `JavaVM`. Compiles on any
+## host for checking (the `jni` bindings are host-portable).
+android = ["dep:jni"]
+## The iOS backend (CoreBluetooth, BLE-only) layered over `btleplug`, which speaks
+## CoreBluetooth on Apple platforms. Discover/connect/GATT only — Apple gives
+## third-party apps no Classic Bluetooth, OBEX, or programmatic pairing.
+ios = ["btleplug"]
 
 [package.metadata.docs.rs]
-features = ["bluez", "btleplug"]
+features = ["bluez", "btleplug", "android", "ios", "port-auth-nm"]

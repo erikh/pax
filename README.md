@@ -34,7 +34,7 @@ Each crate is one responsibility, so you depend on exactly what you use:
 | Crate | What it gives you | Depends on |
 |-------|-------------------|------------|
 | [`pax-core`](crates/pax-core) | Pure value types: [`BdAddr`], [`DeviceId`], [`CoreVersion`], [`ControllerModel`], the [`Standard802`] / 802.1X taxonomy, and the [`TransitEvent`] model. No I/O, no async, no system deps. | — |
-| [`pax-transport`](crates/pax-transport) | The `BluetoothBackend` async trait, the always-on deterministic `MockBackend`, and the optional real backends. | `pax-core` |
+| [`pax-transport`](crates/pax-transport) | The `BluetoothBackend` async trait, the always-on deterministic `MockBackend`, and the optional real backends (BlueZ, btleplug, **Android**, **iOS**). | `pax-core` |
 | [`pax-pairing`](crates/pax-pairing) | Pairing agents (`AcceptAllAgent`, `FixedPinAgent`, `CallbackAgent`, …) and a retrying `pair_device` workflow. | `pax-transport` |
 | [`pax-transfer`](crates/pax-transfer) | High-level `upload_file` / `upload_files` with connection lifecycle, retries, and a clean progress callback. | `pax-transport` |
 | [`pax-diagnostics`](crates/pax-diagnostics) | A `Recorder` (observer) plus an `Analyzer` that splits the event stream by **hardware model**, **Bluetooth spec**, and **IEEE 802 standard**. | `pax-core` |
@@ -212,6 +212,8 @@ not:
 | `MockBackend` | *(always on)* | any | none | none | yes (simulated) |
 | `BlueZBackend` | `bluez` | Linux | D-Bus dev headers (`dbus-devel` / `libdbus-1-dev`) | running `bluetoothd` + `obexd` | **yes** (via obexd, with per-packet progress) |
 | `BtleplugBackend` | `btleplug` | Linux/macOS/Windows | platform BLE toolchain | platform BLE stack | no (BLE-only — `Unsupported`) |
+| `AndroidBackend` | `android` | Android | NDK; embed in an app that hands it a `JavaVM` | `BLUETOOTH_CONNECT`/`SCAN` perms | **yes** (RFCOMM + OBEX, per-chunk progress) |
+| `IosBackend` | `ios` | iOS | macOS + Xcode | — | no (Apple gives apps BLE only — `Unsupported`) |
 
 ```bash
 # Linux: pair, push files (over obexd), full diagnostics:
@@ -245,15 +247,60 @@ What the real backends do today:
 * **`btleplug`** — cross-platform BLE discover/connect/disconnect. Pairing and OBEX
   push return `Unsupported` (BLE bonding is OS-managed; OBEX is BR/EDR-only).
 
+### Running on phones (Android & iOS)
+
+The same `BluetoothBackend` trait drives the phones' own stacks:
+
+* **`android`** — JNI to `android.bluetooth`. Bonded-device discovery, pairing
+  (`createBond`), RFCOMM connect, and **OBEX Object Push** with per-chunk progress
+  (a small, dependency-free OBEX client runs over the socket — and is unit-tested on
+  any host, no phone required). Cross-compile for an Android target with the NDK and
+  embed in an app that hands the backend a `JavaVM`:
+
+  ```rust,ignore
+  let vm = std::sync::Arc::new(/* JavaVM from JNI_OnLoad or env.get_java_vm()? */);
+  let backend = pax_transport::android::AndroidBackend::new(vm, observer)?;
+  // discover / pair / upload_file all work through the usual trait.
+  ```
+
+  *Limitation:* live inquiry (vs. bonded devices) needs a `BroadcastReceiver`
+  companion in your app — on the roadmap.
+
+* **`ios`** — CoreBluetooth via `btleplug` (which speaks CoreBluetooth on Apple
+  targets). Discover/connect/GATT only. `pair` and `push_file` return `Unsupported`
+  because **Apple gives third-party apps no Classic Bluetooth, OBEX, or programmatic
+  pairing** — a platform wall, not a missing feature. To send a file *to* an iPhone,
+  use AirDrop or an app-level GATT protocol.
+
 > **What's verified, and what isn't.** The mock-backed layers (core, pairing,
-> transfer, diagnostics) are covered by the hardware-free suite. The real backends
-> **build and lint cleanly in CI** (`--features all-backends`) but their *runtime*
-> needs an adapter, so end-to-end behavior is exercised by the `PAX_HW_TESTS`-gated
-> tests in [`crates/pax-transport/tests/hardware.rs`](crates/pax-transport/tests/hardware.rs)
-> and the manual smoke-test below — not by CI. Caveats: the controller **version**
-> probe needs `CAP_NET_ADMIN` (falls back to a default otherwise), `obexd` must be
-> running on your session bus for file push, and the `port-auth-nm` resolver maps a
-> coarse NetworkManager device state rather than a precise EAP exchange.
+> transfer, diagnostics) and the pure-Rust pieces (peer detection, the OBEX client)
+> are covered by the hardware-free suite. Every backend — desktop *and* mobile —
+> **builds and lints cleanly in CI** (the `jni` and btleplug wrappers compile on any
+> host), but their *runtime* needs a real adapter/phone, so end-to-end behavior is
+> exercised by the `PAX_HW_TESTS`-gated tests in
+> [`crates/pax-transport/tests/hardware.rs`](crates/pax-transport/tests/hardware.rs)
+> and on-device, not by CI. Caveats: the BlueZ controller **version** probe needs
+> `CAP_NET_ADMIN`, `obexd` must be running for BlueZ file push, the `port-auth-nm`
+> resolver maps a coarse NetworkManager state, and the Android backend must run
+> inside an app that supplies a `JavaVM`.
+
+### Connecting *to* phones: telling Android from iPhone
+
+When the phone is the **peer**, [`DeviceInfo::platform`](crates/pax-core) guesses
+its platform from the Class-of-Device, the Apple company id in BLE manufacturer
+data, and the name — handy because an iPhone will refuse a Classic file push while
+an Android phone accepts one:
+
+```rust,ignore
+use pax_core::peer::PeerPlatform;
+for d in backend.discover(&DiscoveryFilter::new()).await? {
+    match d.platform() {
+        PeerPlatform::IPhone  => println!("{} is an iPhone — no OBEX push", d.label()),
+        PeerPlatform::Android => println!("{} is Android — OBEX push OK", d.label()),
+        other                 => println!("{}: {other}", d.label()),
+    }
+}
+```
 
 ### Wiring 802.1X / PAN auth into diagnostics
 

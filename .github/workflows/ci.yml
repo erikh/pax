@@ -50,7 +50,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install D-Bus headers
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
-      - name: Build all backends
-        run: cargo build -p pax-transport --features all-backends
+      # Every backend compiles on the host (the jni and btleplug wrappers are
+      # host-portable), so we build and lint them all here. Real on-device runs
+      # happen via the PAX_HW_TESTS-gated tests, not in CI.
+      - name: Build all backends (desktop + mobile)
+        run: cargo build -p pax-transport --features "all-backends,android,ios,port-auth-nm"
       - name: Clippy all backends
-        run: cargo clippy -p pax-transport --features all-backends --all-targets
+        run: cargo clippy -p pax-transport --features "all-backends,android,ios,port-auth-nm" --all-targets
+      - name: Test feature-gated unit tests (OBEX client, NM mapping)
+        run: cargo test -p pax-transport --features "android,port-auth-nm"

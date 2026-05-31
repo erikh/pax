@@ -47,6 +47,9 @@ btleplug = "0.11"
 # Pinned to 4.x to keep the 1.75 MSRV; the `tokio` feature shares our runtime.
 zbus = { version = "4.4", default-features = false, features = ["tokio"] }
 libc = "0.2"
+# JNI bindings for the Android backend. `default-features = false` omits the
+# `invocation` API (libjvm linking), so it compiles on any host for checking.
+jni = { version = "0.21", default-features = false }
 uuid = "1"
 
 # Keep debug info modest so a fresh build of the whole workspace is quick.

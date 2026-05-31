@@ -57,6 +57,16 @@ pub mod bluez;
 #[cfg(feature = "btleplug")]
 pub mod btleplug;
 
+/// Android backend (JNI to `android.bluetooth`). Only present with the `android`
+/// feature.
+#[cfg(feature = "android")]
+pub mod android;
+
+/// iOS backend (CoreBluetooth via btleplug, BLE-only). Only present with the
+/// `ios` feature.
+#[cfg(feature = "ios")]
+pub mod ios;
+
 pub use backend::{
     AdapterInfo, BackendKind, BluetoothBackend, Capabilities, Connection, DefaultStandards,
     DiscoveryFilter, SharedStandardsResolver, StandardsFn, StandardsResolver, StaticStandards,

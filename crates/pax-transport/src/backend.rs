@@ -29,15 +29,21 @@ pub enum BackendKind {
     BlueZ,
     /// The cross-platform btleplug BLE backend (feature `btleplug`).
     Btleplug,
+    /// The Android backend (feature `android`).
+    Android,
+    /// The iOS backend (feature `ios`).
+    Ios,
 }
 
 impl BackendKind {
-    /// A stable, lowercase name (`"mock"`, `"bluez"`, `"btleplug"`).
+    /// A stable, lowercase name (`"mock"`, `"bluez"`, `"btleplug"`, …).
     pub const fn name(self) -> &'static str {
         match self {
             BackendKind::Mock => "mock",
             BackendKind::BlueZ => "bluez",
             BackendKind::Btleplug => "btleplug",
+            BackendKind::Android => "android",
+            BackendKind::Ios => "ios",
         }
     }
 }
