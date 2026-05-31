@@ -32,6 +32,10 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *   PaxBluetooth.stopDiscovery(context);
  * </pre>
  */
+// We deliberately use the broadly-compatible APIs: getDefaultAdapter() (rather
+// than BluetoothManager, to support older minSdk) and getParcelableExtra(String)
+// (the typed overload only exists on API 33+). Both still work everywhere.
+@SuppressWarnings("deprecation")
 public final class PaxBluetooth {
     private static final ConcurrentLinkedQueue<String> FOUND = new ConcurrentLinkedQueue<>();
     private static BroadcastReceiver receiver;

@@ -59,3 +59,32 @@ jobs:
         run: cargo clippy -p pax-transport --features "all-backends,android,ios,port-auth-nm" --all-targets
       - name: Test feature-gated unit tests (OBEX client, NM mapping)
         run: cargo test -p pax-transport --features "android,port-auth-nm"
+
+  # Verify the Android backend cross-compiles to real Android ABIs (it is a pure
+  # Rust library with no C deps, so this needs only the Rust target — no NDK), and
+  # that the Java companion compiles against the Android API.
+  android:
+    name: android cross-build + companion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Cross-compile android backend (device + emulator ABIs)
+        run: |
+          cargo build -p pax-transport --target aarch64-linux-android --features android
+          cargo build -p pax-transport --target x86_64-linux-android --features android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - name: Install platform + compile the Java companion
+        run: |
+          sdkmanager "platforms;android-34"
+          javac -Xlint:all -Werror \
+            -cp "$ANDROID_HOME/platforms/android-34/android.jar" \
+            -d "$RUNNER_TEMP/companion" \
+            crates/pax-transport/android-companion/dev/pax/PaxBluetooth.java

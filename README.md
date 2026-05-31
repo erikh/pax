@@ -279,15 +279,32 @@ The same `BluetoothBackend` trait drives the phones' own stacks:
 
 > **What's verified, and what isn't.** The mock-backed layers (core, pairing,
 > transfer, diagnostics) and the pure-Rust pieces (peer detection, the OBEX client)
-> are covered by the hardware-free suite. Every backend — desktop *and* mobile —
-> **builds and lints cleanly in CI** (the `jni` and btleplug wrappers compile on any
-> host), but their *runtime* needs a real adapter/phone, so end-to-end behavior is
-> exercised by the `PAX_HW_TESTS`-gated tests in
-> [`crates/pax-transport/tests/hardware.rs`](crates/pax-transport/tests/hardware.rs)
+> are covered by the hardware-free suite. Every backend builds and lints in CI; the
+> Android backend additionally **cross-compiles to the real `aarch64-` and
+> `x86_64-linux-android` ABIs** (it is a pure-Rust library, so no NDK is needed) and
+> the **Java companion compiles `-Werror` against the Android 34 API**. What still
+> needs real hardware is *runtime* behavior — exercised by the `PAX_HW_TESTS`-gated
+> tests in [`crates/pax-transport/tests/hardware.rs`](crates/pax-transport/tests/hardware.rs)
 > and on-device, not by CI. Caveats: the BlueZ controller **version** probe needs
 > `CAP_NET_ADMIN`, `obexd` must be running for BlueZ file push, the `port-auth-nm`
 > resolver maps a coarse NetworkManager state, and the Android backend must run
 > inside an app that supplies a `JavaVM`.
+
+### Building for Android
+
+```bash
+rustup target add aarch64-linux-android x86_64-linux-android
+# A *library* build needs no NDK (pure Rust, no link step):
+cargo build -p pax-transport --target aarch64-linux-android --features android
+# Compile the companion against the Android API (any JDK + an android.jar):
+javac -cp "$ANDROID_HOME/platforms/android-34/android.jar" \
+  crates/pax-transport/android-companion/dev/pax/PaxBluetooth.java
+```
+
+Producing the final app `.so` (a `cdylib`) *does* need the NDK linker. Note the
+NDK ships **x86_64-host binaries only**, so on an ARM-Linux host (e.g. Asahi) you
+build the `.so` from an x86_64 machine / CI, or run the NDK under emulation — the
+library cross-compile above still works natively on ARM.
 
 ### Connecting *to* phones: telling Android from iPhone
 
