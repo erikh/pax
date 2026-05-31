@@ -384,6 +384,8 @@ impl BluetoothBackend for AndroidBackend {
             transports: vec![Transport::BrEdr, Transport::Le, Transport::Dual],
             can_pair: true,
             can_push_files: true,
+            max_concurrent_pairings: 1,
+            can_accept_pairings: false,
         }
     }
 

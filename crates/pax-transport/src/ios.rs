@@ -74,6 +74,8 @@ impl BluetoothBackend for IosBackend {
             transports: vec![pax_core::Transport::Le],
             can_pair: false,
             can_push_files: false,
+            max_concurrent_pairings: 1,
+            can_accept_pairings: false,
         }
     }
 

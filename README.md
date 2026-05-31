@@ -93,7 +93,7 @@ async fn main() -> Result<(), pax_transport::TransportError> {
     let found = backend.discover(&DiscoveryFilter::new()).await?;
     println!("found {} device(s)", found.len());
 
-    pair_device(&backend, phone, &AcceptAllAgent::new(), PairOptions::default()).await?;
+    pair_device(&backend, phone, std::sync::Arc::new(AcceptAllAgent::new()), PairOptions::default()).await?;
 
     let receipt = upload_bytes(
         &backend, phone, "hello.txt", b"the quick brown fox", UploadOptions::default(),
@@ -137,10 +137,38 @@ let _ = CallbackAgent::new(|req| match req {          // bespoke logic
 // pair_device retries transient failures but never re-asks after a real refusal.
 # async fn demo(backend: &dyn pax_transport::BluetoothBackend, id: pax_core::DeviceId)
 #   -> Result<(), pax_transport::TransportError> {
-let report = pair_device(backend, id, &AcceptAllAgent::new(), PairOptions { retries: 3 }).await?;
+let agent = std::sync::Arc::new(AcceptAllAgent::new());
+let report = pair_device(backend, id, agent, PairOptions { retries: 3 }).await?;
 println!("paired in {} attempt(s)", report.attempts);
 # Ok(()) }
 ```
+
+#### Pairing with many devices
+
+Two one-call helpers fan pairing out — and pick their concurrency **transparently**
+from the backend (concurrent on the mock, sequential on a single real controller,
+no caller branching):
+
+```rust,ignore
+use std::sync::Arc;
+use pax_pairing::{agents::AcceptAllAgent, pair_devices, BatchPairOptions};
+use pax_transport::InboundPairing;
+
+// Outbound, round-robin: pair a known list. One failure never aborts the rest;
+// you get a PairItem per device, in order.
+let results = pair_devices(backend, &targets, Arc::new(AcceptAllAgent::new()),
+                           BatchPairOptions::default()).await;
+for r in &results { println!("{} -> {}", r.id, if r.paired() {"ok"} else {"failed"}); }
+
+// Inbound "broadcast": make THIS adapter discoverable + pairable and accept bonds
+// from many devices at once (a hub/kiosk accepting phones). BlueZ + mock only.
+let bonded = backend.accept_pairings(Arc::new(AcceptAllAgent::new()),
+                                     InboundPairing::for_window(std::time::Duration::from_secs(30).into())).await?;
+```
+
+`pair_discovered(backend, filter, agent, opts)` combines discovery with outbound
+batch pairing. Run the hardware-gated tests with `PAX_HW_TESTS=1` plus
+`PAX_HW_PAIR_TARGETS=addr1,addr2` (outbound) or `PAX_HW_PAIR_WINDOW=20` (inbound).
 
 ### 2. Upload files — `pax-transfer`
 

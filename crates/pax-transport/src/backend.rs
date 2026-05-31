@@ -10,16 +10,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use pax_core::{
-    BdAddr, ControllerModel, DeviceId, DeviceInfo, EventOrigin, SpecContext, StandardsProfile,
-    Transport,
+    BdAddr, ControllerModel, DeviceId, DeviceInfo, Duration, EventOrigin, SpecContext,
+    StandardsProfile, Transport,
 };
 
-use crate::error::Result;
+use crate::error::{Result, TransportError};
 use crate::pairing::{PairingAgent, PairingOutcome};
 use crate::transfer::{OutboundFile, TransferReceipt};
 
 /// Which concrete backend produced a value. Useful in logs and in
-/// [`TransportError::Unsupported`](crate::TransportError::Unsupported).
+/// [`TransportError::Unsupported`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum BackendKind {
@@ -61,6 +61,18 @@ pub struct Capabilities {
     pub can_pair: bool,
     /// Whether the backend can push files via OBEX Object Push.
     pub can_push_files: bool,
+    /// How many devices the backend can pair **concurrently** without conflict.
+    ///
+    /// `1` means pairing is serialized — true for any single real controller,
+    /// where one D-Bus pairing agent and one baseband handle one bond at a time.
+    /// Higher means it is safe to fan out that many pairings at once (the mock).
+    /// The batch pairer reads this to choose concurrency *transparently*, so the
+    /// same call runs concurrently where possible and sequentially where not.
+    pub max_concurrent_pairings: usize,
+    /// Whether the backend can accept **inbound** bonds — i.e. become
+    /// discoverable + pairable so other devices pair *to* it
+    /// ([`BluetoothBackend::accept_pairings`]).
+    pub can_accept_pairings: bool,
 }
 
 impl Capabilities {
@@ -199,6 +211,41 @@ impl DiscoveryFilter {
     }
 }
 
+/// Settings for an inbound "pairing mode" run ([`BluetoothBackend::accept_pairings`]).
+///
+/// The adapter becomes discoverable + pairable and accepts bonds from any device
+/// that initiates pairing, until `window` elapses or `max_devices` have bonded.
+#[derive(Clone, Copy, Debug)]
+pub struct InboundPairing {
+    /// How long to stay discoverable + pairable accepting bonds.
+    pub window: Duration,
+    /// Stop early once this many devices have bonded, if set.
+    pub max_devices: Option<usize>,
+}
+
+impl InboundPairing {
+    /// Accept inbound bonds for `window`, with no device cap.
+    pub fn for_window(window: Duration) -> Self {
+        InboundPairing {
+            window,
+            max_devices: None,
+        }
+    }
+
+    /// Builder: stop after `n` devices have bonded.
+    pub fn max_devices(mut self, n: usize) -> Self {
+        self.max_devices = Some(n);
+        self
+    }
+}
+
+impl Default for InboundPairing {
+    /// A 30-second window with no device cap.
+    fn default() -> Self {
+        InboundPairing::for_window(Duration::from_secs(30))
+    }
+}
+
 /// Supplies the IEEE 802 standards context ([`StandardsProfile`]) for a link.
 ///
 /// A Bluetooth library has no inherent way to know a link's 802.1X port-auth
@@ -331,6 +378,46 @@ pub trait BluetoothBackend: Send + Sync {
     /// failure) to the configured observer.
     async fn push_file(&self, conn: &Connection, file: OutboundFile<'_>)
         -> Result<TransferReceipt>;
+
+    /// Make the local adapter discoverable (visible to scans) or not.
+    ///
+    /// Default: [`TransportError::Unsupported`]. Override on backends that can
+    /// accept inbound bonds (see [`Capabilities::can_accept_pairings`]).
+    async fn set_discoverable(&self, _on: bool, _timeout: Option<Duration>) -> Result<()> {
+        Err(TransportError::Unsupported {
+            backend: "",
+            operation: "set_discoverable",
+        })
+    }
+
+    /// Make the local adapter pairable (will accept incoming bonds) or not.
+    ///
+    /// Default: [`TransportError::Unsupported`].
+    async fn set_pairable(&self, _on: bool, _timeout: Option<Duration>) -> Result<()> {
+        Err(TransportError::Unsupported {
+            backend: "",
+            operation: "set_pairable",
+        })
+    }
+
+    /// Enter **inbound pairing mode** ("broadcast"): become discoverable + pairable
+    /// and accept bonds initiated *by other devices*, using `agent` to answer any
+    /// prompts, until `opts.window` elapses or `opts.max_devices` have bonded.
+    /// Returns the devices that bonded; restores discoverable/pairable off on exit.
+    ///
+    /// This is the true one-to-many: one call lets many phones pair to this adapter.
+    /// Default: [`TransportError::Unsupported`] (only the mock and BlueZ implement it;
+    /// BLE bonding and inbound Classic on mobile are OS-managed).
+    async fn accept_pairings(
+        &self,
+        _agent: Arc<dyn PairingAgent>,
+        _opts: InboundPairing,
+    ) -> Result<Vec<DeviceId>> {
+        Err(TransportError::Unsupported {
+            backend: "",
+            operation: "accept_pairings",
+        })
+    }
 }
 
 #[cfg(test)]

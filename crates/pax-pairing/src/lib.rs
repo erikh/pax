@@ -28,4 +28,6 @@ pub mod agents;
 pub mod workflow;
 
 pub use agents::{AcceptAllAgent, CallbackAgent, FixedPinAgent, RejectAllAgent};
-pub use workflow::{pair_device, PairOptions, PairReport};
+pub use workflow::{
+    pair_device, pair_devices, pair_discovered, BatchPairOptions, PairItem, PairOptions, PairReport,
+};

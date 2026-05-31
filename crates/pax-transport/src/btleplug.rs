@@ -141,6 +141,8 @@ impl BluetoothBackend for BtleplugBackend {
             transports: vec![Transport::Le],
             can_pair: false,
             can_push_files: false,
+            max_concurrent_pairings: 1,
+            can_accept_pairings: false,
         }
     }
 

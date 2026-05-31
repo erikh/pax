@@ -34,14 +34,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use pax_core::{
-    BdAddr, ChipsetFamily, CompanyId, ControllerModel, DeviceId, DeviceInfo, Direction,
+    BdAddr, ChipsetFamily, CompanyId, ControllerModel, DeviceId, DeviceInfo, Direction, Duration,
     EventOrigin, NoopObserver, SharedObserver, SpecContext, StandardsProfile, Timestamp,
     TransitEvent, TransitEventKind, Transport,
 };
 
 use crate::backend::{
     AdapterInfo, BackendKind, BluetoothBackend, Capabilities, Connection, DefaultStandards,
-    DiscoveryFilter, SharedStandardsResolver, StaticStandards,
+    DiscoveryFilter, InboundPairing, SharedStandardsResolver, StaticStandards,
 };
 use crate::error::{Result, TransportError};
 use crate::pairing::{PairingAgent, PairingOutcome, PairingRequest, PairingResponse};
@@ -60,6 +60,11 @@ pub mod port_auth;
 type ReqFuture<T> = std::pin::Pin<
     Box<dyn std::future::Future<Output = std::result::Result<T, bluer::agent::ReqError>> + Send>,
 >;
+
+/// Shared cell recording which SSP method the peer invoked (for outbound `pair`).
+type MethodSeen = Arc<std::sync::Mutex<Option<pax_core::PairingMethodHint>>>;
+/// Shared set of devices that authorized a bond (for inbound `accept_pairings`).
+type BondedSet = Arc<std::sync::Mutex<std::collections::HashSet<DeviceId>>>;
 
 /// Convert a [`bluer::Address`] into a core [`BdAddr`].
 fn from_bluer_addr(a: bluer::Address) -> BdAddr {
@@ -217,6 +222,116 @@ impl BlueZBackend {
         }
         Ok(info)
     }
+
+    /// Build a BlueZ D-Bus agent that bridges to the toolkit's `PairingAgent`.
+    ///
+    /// Returns the agent plus two shared cells the callbacks populate:
+    /// `method_seen` (the SSP model the peer invoked — used by outbound `pair`),
+    /// and `bonded` (the set of devices that authorized a bond — used by inbound
+    /// `accept_pairings`). Each callback records into both, so the same agent
+    /// serves both directions.
+    fn build_bluer_agent(
+        &self,
+        agent: Arc<dyn PairingAgent>,
+    ) -> (bluer::agent::Agent, MethodSeen, BondedSet) {
+        use bluer::agent::{
+            Agent, ReqError, RequestAuthorization, RequestConfirmation, RequestPasskey,
+            RequestPinCode,
+        };
+        use pax_core::PairingMethodHint;
+
+        let method_seen: MethodSeen = Arc::new(std::sync::Mutex::new(None::<PairingMethodHint>));
+        let bonded: BondedSet = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+
+        let (a, m, b) = (agent.clone(), method_seen.clone(), bonded.clone());
+        let request_confirmation = Box::new(move |req: RequestConfirmation| {
+            let (a, m, b) = (a.clone(), m.clone(), b.clone());
+            Box::pin(async move {
+                *m.lock().unwrap() = Some(PairingMethodHint::NumericComparison);
+                match a
+                    .respond(PairingRequest::ConfirmPasskey {
+                        passkey: req.passkey,
+                    })
+                    .await
+                {
+                    PairingResponse::Confirm(true) => {
+                        b.lock()
+                            .unwrap()
+                            .insert(DeviceId::public(from_bluer_addr(req.device)));
+                        Ok(())
+                    }
+                    PairingResponse::Cancel => Err(ReqError::Canceled),
+                    _ => Err(ReqError::Rejected),
+                }
+            }) as ReqFuture<()>
+        });
+
+        let (a, m, b) = (agent.clone(), method_seen.clone(), bonded.clone());
+        let request_pin_code = Box::new(move |req: RequestPinCode| {
+            let (a, m, b) = (a.clone(), m.clone(), b.clone());
+            Box::pin(async move {
+                *m.lock().unwrap() = Some(PairingMethodHint::PinCode);
+                match a.respond(PairingRequest::RequestPinCode).await {
+                    PairingResponse::Pin(pin) => {
+                        b.lock()
+                            .unwrap()
+                            .insert(DeviceId::public(from_bluer_addr(req.device)));
+                        Ok(pin)
+                    }
+                    PairingResponse::Cancel => Err(ReqError::Canceled),
+                    _ => Err(ReqError::Rejected),
+                }
+            }) as ReqFuture<String>
+        });
+
+        let (a, m, b) = (agent.clone(), method_seen.clone(), bonded.clone());
+        let request_passkey = Box::new(move |req: RequestPasskey| {
+            let (a, m, b) = (a.clone(), m.clone(), b.clone());
+            Box::pin(async move {
+                *m.lock().unwrap() = Some(PairingMethodHint::PasskeyEntry);
+                match a.respond(PairingRequest::RequestPasskey).await {
+                    PairingResponse::Passkey(p) => {
+                        b.lock()
+                            .unwrap()
+                            .insert(DeviceId::public(from_bluer_addr(req.device)));
+                        Ok(p)
+                    }
+                    PairingResponse::Cancel => Err(ReqError::Canceled),
+                    _ => Err(ReqError::Rejected),
+                }
+            }) as ReqFuture<u32>
+        });
+
+        let (a, m, b) = (agent.clone(), method_seen.clone(), bonded.clone());
+        let request_authorization = Box::new(move |req: RequestAuthorization| {
+            let (a, m, b) = (a.clone(), m.clone(), b.clone());
+            Box::pin(async move {
+                *m.lock().unwrap() = Some(PairingMethodHint::JustWorks);
+                match a.respond(PairingRequest::ConfirmJustWorks).await {
+                    PairingResponse::Confirm(true) => {
+                        b.lock()
+                            .unwrap()
+                            .insert(DeviceId::public(from_bluer_addr(req.device)));
+                        Ok(())
+                    }
+                    PairingResponse::Cancel => Err(ReqError::Canceled),
+                    _ => Err(ReqError::Rejected),
+                }
+            }) as ReqFuture<()>
+        });
+
+        let bluer_agent = Agent {
+            // Become the default agent so BlueZ routes prompts here for the
+            // duration; dropping the handle restores the previous agent.
+            request_default: true,
+            request_pin_code: Some(request_pin_code),
+            request_passkey: Some(request_passkey),
+            request_confirmation: Some(request_confirmation),
+            request_authorization: Some(request_authorization),
+            ..Default::default()
+        };
+        (bluer_agent, method_seen, bonded)
+    }
 }
 
 #[async_trait]
@@ -231,6 +346,9 @@ impl BluetoothBackend for BlueZBackend {
             transports: vec![Transport::BrEdr, Transport::Le, Transport::Dual],
             can_pair: true,
             can_push_files: true,
+            // One controller + one default D-Bus agent => pairing is serialized.
+            max_concurrent_pairings: 1,
+            can_accept_pairings: true,
         }
     }
 
@@ -293,90 +411,11 @@ impl BluetoothBackend for BlueZBackend {
     }
 
     async fn pair(&self, target: DeviceId, agent: Arc<dyn PairingAgent>) -> Result<PairingOutcome> {
-        // Bridge the toolkit's `PairingAgent` into a BlueZ D-Bus agent: each
-        // callback captures a clone of the agent and forwards the prompt. The
-        // agent is registered only for the duration of this call (the handle
-        // unregisters on drop).
-        use bluer::agent::{
-            Agent, ReqError, RequestAuthorization, RequestConfirmation, RequestPasskey,
-            RequestPinCode,
-        };
         use pax_core::PairingMethodHint;
 
-        // Records which SSP association model the peer actually invoked, so the
-        // emitted events carry the real method rather than a guess.
-        let method_seen = Arc::new(std::sync::Mutex::new(None::<PairingMethodHint>));
-
-        let bluer_agent = {
-            let (a, m) = (agent.clone(), method_seen.clone());
-            let request_confirmation = Box::new(move |req: RequestConfirmation| {
-                let (a, m) = (a.clone(), m.clone());
-                Box::pin(async move {
-                    *m.lock().unwrap() = Some(PairingMethodHint::NumericComparison);
-                    match a
-                        .respond(PairingRequest::ConfirmPasskey {
-                            passkey: req.passkey,
-                        })
-                        .await
-                    {
-                        PairingResponse::Confirm(true) => Ok(()),
-                        PairingResponse::Cancel => Err(ReqError::Canceled),
-                        _ => Err(ReqError::Rejected),
-                    }
-                }) as ReqFuture<()>
-            });
-
-            let (a, m) = (agent.clone(), method_seen.clone());
-            let request_pin_code = Box::new(move |_req: RequestPinCode| {
-                let (a, m) = (a.clone(), m.clone());
-                Box::pin(async move {
-                    *m.lock().unwrap() = Some(PairingMethodHint::PinCode);
-                    match a.respond(PairingRequest::RequestPinCode).await {
-                        PairingResponse::Pin(pin) => Ok(pin),
-                        PairingResponse::Cancel => Err(ReqError::Canceled),
-                        _ => Err(ReqError::Rejected),
-                    }
-                }) as ReqFuture<String>
-            });
-
-            let (a, m) = (agent.clone(), method_seen.clone());
-            let request_passkey = Box::new(move |_req: RequestPasskey| {
-                let (a, m) = (a.clone(), m.clone());
-                Box::pin(async move {
-                    *m.lock().unwrap() = Some(PairingMethodHint::PasskeyEntry);
-                    match a.respond(PairingRequest::RequestPasskey).await {
-                        PairingResponse::Passkey(p) => Ok(p),
-                        PairingResponse::Cancel => Err(ReqError::Canceled),
-                        _ => Err(ReqError::Rejected),
-                    }
-                }) as ReqFuture<u32>
-            });
-
-            let (a, m) = (agent.clone(), method_seen.clone());
-            let request_authorization = Box::new(move |_req: RequestAuthorization| {
-                let (a, m) = (a.clone(), m.clone());
-                Box::pin(async move {
-                    *m.lock().unwrap() = Some(PairingMethodHint::JustWorks);
-                    match a.respond(PairingRequest::ConfirmJustWorks).await {
-                        PairingResponse::Confirm(true) => Ok(()),
-                        PairingResponse::Cancel => Err(ReqError::Canceled),
-                        _ => Err(ReqError::Rejected),
-                    }
-                }) as ReqFuture<()>
-            });
-
-            Agent {
-                // Become the default agent so BlueZ routes prompts here for the
-                // duration; dropping the handle restores the previous agent.
-                request_default: true,
-                request_pin_code: Some(request_pin_code),
-                request_passkey: Some(request_passkey),
-                request_confirmation: Some(request_confirmation),
-                request_authorization: Some(request_authorization),
-                ..Default::default()
-            }
-        };
-
+        // Bridge the toolkit's `PairingAgent` into a BlueZ D-Bus agent, registered
+        // only for the duration of this call (the handle unregisters on drop).
+        let (bluer_agent, method_seen, _bonded) = self.build_bluer_agent(agent);
         let _handle = self
             .session
             .register_agent(bluer_agent)
@@ -510,6 +549,76 @@ impl BluetoothBackend for BlueZBackend {
                 Err(e)
             }
         }
+    }
+
+    async fn set_discoverable(&self, on: bool, timeout: Option<Duration>) -> Result<()> {
+        if let Some(t) = timeout {
+            let secs = (t.as_millis() / 1000) as u32;
+            self.adapter
+                .set_discoverable_timeout(secs)
+                .await
+                .map_err(map_err)?;
+        }
+        self.adapter.set_discoverable(on).await.map_err(map_err)
+    }
+
+    async fn set_pairable(&self, on: bool, timeout: Option<Duration>) -> Result<()> {
+        if let Some(t) = timeout {
+            let secs = (t.as_millis() / 1000) as u32;
+            self.adapter
+                .set_pairable_timeout(secs)
+                .await
+                .map_err(map_err)?;
+        }
+        self.adapter.set_pairable(on).await.map_err(map_err)
+    }
+
+    async fn accept_pairings(
+        &self,
+        agent: Arc<dyn PairingAgent>,
+        opts: InboundPairing,
+    ) -> Result<Vec<DeviceId>> {
+        // Register the bridged agent and become discoverable + pairable. The agent
+        // callbacks record each device that authorizes a bond into `bonded`.
+        let (bluer_agent, _method_seen, bonded) = self.build_bluer_agent(agent);
+        let _handle = self
+            .session
+            .register_agent(bluer_agent)
+            .await
+            .map_err(map_err)?;
+
+        // Set the BlueZ timeouts too, so the adapter auto-reverts even if we die.
+        let secs = ((opts.window.as_millis() / 1000) as u32).max(1);
+        let _ = self.adapter.set_pairable_timeout(secs).await;
+        let _ = self.adapter.set_discoverable_timeout(secs).await;
+        self.adapter.set_pairable(true).await.map_err(map_err)?;
+        self.adapter.set_discoverable(true).await.map_err(map_err)?;
+
+        // Hold the window open, stopping early once `max_devices` have bonded.
+        let window = std::time::Duration::from_millis(opts.window.as_millis() as u64);
+        let deadline = tokio::time::Instant::now() + window;
+        loop {
+            if let Some(max) = opts.max_devices {
+                if bonded.lock().unwrap().len() >= max {
+                    break;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            tokio::time::sleep(remaining.min(std::time::Duration::from_millis(250))).await;
+        }
+
+        // Revert visibility (best-effort) and drop the agent handle on return.
+        let _ = self.adapter.set_discoverable(false).await;
+        let _ = self.adapter.set_pairable(false).await;
+
+        let ids: Vec<DeviceId> = bonded.lock().unwrap().iter().copied().collect();
+        for id in &ids {
+            self.emit(*id, TransitEventKind::PairingCompleted);
+        }
+        Ok(ids)
     }
 }
 

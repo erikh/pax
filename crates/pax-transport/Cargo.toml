@@ -30,6 +30,9 @@ jni = { workspace = true, optional = true }
 [dev-dependencies]
 # Tests drive the async trait on a single-threaded runtime; no hardware needed.
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+# Used only by the hardware-gated batch/inbound pairing tests. The dev-dependency
+# cycle (pax-pairing depends on pax-transport) is allowed by cargo.
+pax-pairing = { workspace = true }
 
 [features]
 default = []

@@ -14,6 +14,8 @@ categories = ["network-programming"]
 pax-core = { workspace = true }
 pax-transport = { workspace = true }
 async-trait = { workspace = true }
+# Bounded-concurrency fan-out for batch pairing (buffer_unordered).
+futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "sync"] }

@@ -66,6 +66,7 @@ use std::sync::Arc;
 
 use crate::backend::{
     AdapterInfo, BackendKind, BluetoothBackend, Capabilities, Connection, DiscoveryFilter,
+    InboundPairing,
 };
 use crate::error::{Result, TransportError};
 use crate::pairing::{PairingAgent, PairingOutcome, PairingRequest, PairingResponse};
@@ -73,6 +74,25 @@ use crate::transfer::{OutboundFile, TransferReceipt};
 
 /// The deterministic passkey the mock uses for passkey/numeric-comparison flows.
 pub const MOCK_PASSKEY: u32 = 123_456;
+
+/// Map an SSP association model to the prompt the mock raises to a pairing agent.
+fn request_for(method: PairingMethodHint) -> PairingRequest {
+    match method {
+        PairingMethodHint::JustWorks => PairingRequest::ConfirmJustWorks,
+        PairingMethodHint::NumericComparison => PairingRequest::ConfirmPasskey {
+            passkey: MOCK_PASSKEY,
+        },
+        PairingMethodHint::PinCode => PairingRequest::RequestPinCode,
+        PairingMethodHint::PasskeyEntry => PairingRequest::RequestPasskey,
+        PairingMethodHint::PasskeyDisplay => PairingRequest::DisplayPasskey {
+            passkey: MOCK_PASSKEY,
+        },
+        PairingMethodHint::OutOfBand => PairingRequest::ConfirmJustWorks,
+        // `PairingMethodHint` is `#[non_exhaustive]`; treat any future model as a
+        // simple confirmation for the mock.
+        _ => PairingRequest::ConfirmJustWorks,
+    }
+}
 
 /// A scripted fake device the [`MockBackend`] knows about.
 ///
@@ -189,6 +209,9 @@ pub struct MockBackend {
     spec: SpecContext,
     powered: Mutex<bool>,
     observer: SharedObserver,
+    /// Devices that will bond *to* this adapter during [`MockBackend::accept_pairings`]
+    /// (the inbound "pairing mode" simulation).
+    incoming: Vec<MockDevice>,
     state: Mutex<MockState>,
 }
 
@@ -260,6 +283,9 @@ impl BluetoothBackend for MockBackend {
             transports: vec![Transport::BrEdr, Transport::Le, Transport::Dual],
             can_pair: true,
             can_push_files: true,
+            // The mock has no real radio, so pairings can run fully concurrently.
+            max_concurrent_pairings: usize::MAX,
+            can_accept_pairings: true,
         }
     }
 
@@ -334,22 +360,7 @@ impl BluetoothBackend for MockBackend {
 
         // Translate the method into a concrete prompt and ask the agent. NOTE:
         // the lock is NOT held here — `respond` is async and may block on a human.
-        let request = match method {
-            PairingMethodHint::JustWorks => PairingRequest::ConfirmJustWorks,
-            PairingMethodHint::NumericComparison => PairingRequest::ConfirmPasskey {
-                passkey: MOCK_PASSKEY,
-            },
-            PairingMethodHint::PinCode => PairingRequest::RequestPinCode,
-            PairingMethodHint::PasskeyEntry => PairingRequest::RequestPasskey,
-            PairingMethodHint::PasskeyDisplay => PairingRequest::DisplayPasskey {
-                passkey: MOCK_PASSKEY,
-            },
-            PairingMethodHint::OutOfBand => PairingRequest::ConfirmJustWorks,
-            // `PairingMethodHint` is `#[non_exhaustive]`; treat any future model
-            // as a simple confirmation for the mock.
-            _ => PairingRequest::ConfirmJustWorks,
-        };
-        let response = agent.respond(request).await;
+        let response = agent.respond(request_for(method)).await;
 
         // A rejection from the agent ends pairing before any device-side failure.
         let rejected = matches!(
@@ -518,6 +529,66 @@ impl BluetoothBackend for MockBackend {
             duration,
         })
     }
+
+    async fn set_discoverable(&self, _on: bool, _timeout: Option<Duration>) -> Result<()> {
+        // The mock has no real radio to toggle; "accepting" is always possible.
+        Ok(())
+    }
+
+    async fn set_pairable(&self, _on: bool, _timeout: Option<Duration>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn accept_pairings(
+        &self,
+        agent: Arc<dyn PairingAgent>,
+        opts: InboundPairing,
+    ) -> Result<Vec<DeviceId>> {
+        // Simulate the scripted inbound devices bonding *to* this adapter, in
+        // order, up to `max_devices`. Each consults the agent like an outbound pair.
+        let limit = opts.max_devices.unwrap_or(usize::MAX);
+        let mut bonded = Vec::new();
+        for device in self.incoming.iter().take(limit) {
+            let origin = device.origin(&self.controller);
+            let method = device.pairing_method;
+            self.emit(
+                origin.clone(),
+                TransitEventKind::PairingStarted { method },
+                self.step(),
+            );
+
+            let response = agent.respond(request_for(method)).await;
+            if matches!(
+                response,
+                PairingResponse::Confirm(false) | PairingResponse::Cancel
+            ) {
+                self.emit(
+                    origin,
+                    TransitEventKind::PairingFailed {
+                        reason: "declined by pairing agent".to_string(),
+                    },
+                    self.step(),
+                );
+                continue;
+            }
+            if let Some(reason) = device.pairing_failure.clone() {
+                self.emit(
+                    origin,
+                    TransitEventKind::PairingFailed { reason },
+                    self.step(),
+                );
+                continue;
+            }
+
+            self.state.lock().unwrap().paired.insert(device.info.id);
+            self.emit(origin, TransitEventKind::PairingCompleted, self.step());
+            bonded.push(device.info.id);
+        }
+
+        // Advance the virtual clock by the configured window for realism.
+        self.state.lock().unwrap().clock_ns += opts.window.as_nanos();
+        Ok(bonded)
+    }
 }
 
 /// Builder for [`MockBackend`].
@@ -529,6 +600,7 @@ pub struct MockBackendBuilder {
     spec: SpecContext,
     observer: Option<SharedObserver>,
     devices: Vec<MockDevice>,
+    incoming: Vec<MockDevice>,
 }
 
 impl MockBackendBuilder {
@@ -540,6 +612,7 @@ impl MockBackendBuilder {
             controller: ControllerModel::virtual_model("pax-mock-0"),
             spec: SpecContext::new(pax_core::CoreVersion::V5_2, Transport::BrEdr),
             observer: None,
+            incoming: Vec::new(),
             devices: Vec::new(),
         }
     }
@@ -592,6 +665,15 @@ impl MockBackendBuilder {
         self
     }
 
+    /// Add a device that will bond *to* this adapter during
+    /// [`MockBackend::accept_pairings`] (the inbound "pairing mode" simulation).
+    /// Its `pairing_method` / `pairing_failure` drive how the inbound bond behaves,
+    /// just like an outbound [`MockDevice`].
+    pub fn incoming_device(mut self, device: MockDevice) -> Self {
+        self.incoming.push(device);
+        self
+    }
+
     /// Finalize into a [`MockBackend`].
     pub fn build(self) -> MockBackend {
         MockBackend {
@@ -602,6 +684,7 @@ impl MockBackendBuilder {
             spec: self.spec,
             powered: Mutex::new(true),
             observer: self.observer.unwrap_or_else(|| Arc::new(NoopObserver)),
+            incoming: self.incoming,
             state: Mutex::new(MockState {
                 devices: self.devices,
                 seq: 0,
@@ -693,5 +776,64 @@ mod tests {
             TransportError::TransferFailed { transferred, .. } => assert_eq!(transferred, 2048),
             other => panic!("unexpected: {other}"),
         }
+    }
+
+    /// A trivial accept-everything agent for the inbound tests.
+    struct Yes;
+    #[async_trait::async_trait]
+    impl PairingAgent for Yes {
+        async fn respond(&self, req: PairingRequest) -> PairingResponse {
+            match req {
+                PairingRequest::ConfirmJustWorks | PairingRequest::ConfirmPasskey { .. } => {
+                    PairingResponse::Confirm(true)
+                }
+                PairingRequest::RequestPinCode => PairingResponse::Pin("0000".into()),
+                PairingRequest::RequestPasskey => PairingResponse::Passkey(0),
+                _ => PairingResponse::Acknowledged,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_pairings_bonds_incoming_devices() {
+        let rec = Arc::new(Rec::default());
+        let a: DeviceId = "AA:00:00:00:00:01".parse().unwrap();
+        let b: DeviceId = "AA:00:00:00:00:02".parse().unwrap();
+        let backend = MockBackend::builder()
+            .observer(rec.clone())
+            .incoming_device(MockDevice::new(a, "Phone A"))
+            .incoming_device(MockDevice::new(b, "Phone B"))
+            .build();
+
+        let bonded = backend
+            .accept_pairings(Arc::new(Yes), InboundPairing::default())
+            .await
+            .unwrap();
+        assert_eq!(bonded.len(), 2);
+        assert!(bonded.contains(&a) && bonded.contains(&b));
+        assert_eq!(
+            rec.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind.label() == "pairing-completed")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_pairings_respects_max_devices() {
+        let a: DeviceId = "AA:00:00:00:00:01".parse().unwrap();
+        let b: DeviceId = "AA:00:00:00:00:02".parse().unwrap();
+        let backend = MockBackend::builder()
+            .incoming_device(MockDevice::new(a, "A"))
+            .incoming_device(MockDevice::new(b, "B"))
+            .build();
+        let bonded = backend
+            .accept_pairings(Arc::new(Yes), InboundPairing::default().max_devices(1))
+            .await
+            .unwrap();
+        assert_eq!(bonded, vec![a]);
     }
 }
