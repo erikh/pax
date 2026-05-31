@@ -13,16 +13,33 @@
 //!
 //! # Capabilities
 //!
-//! * **Discovery** lists already-bonded devices (`getBondedDevices`). Live inquiry
-//!   needs a `BroadcastReceiver` companion in your app (Android delivers results
-//!   via `ACTION_FOUND` broadcasts, not a synchronous call) — see the roadmap.
+//! * **Discovery** lists bonded devices (`getBondedDevices`), and — when you supply
+//!   an Android `Context` via `AndroidBackend::with_context` and bundle the
+//!   `dev.pax.PaxBluetooth` companion class — also runs a live classic inquiry
+//!   (Android delivers those results via `ACTION_FOUND` broadcasts, which the
+//!   companion buffers for us to poll). The companion lives at
+//!   `crates/pax-transport/android-companion/dev/pax/PaxBluetooth.java`.
 //! * **Pairing** calls `BluetoothDevice.createBond()`.
 //! * **Connect** opens an RFCOMM socket to the OBEX Object Push service.
 //! * **File push** runs the `obex_opp` client over that socket — real OBEX
 //!   Object Push with per-chunk progress.
 //!
-//! Permissions: your app must hold `BLUETOOTH_CONNECT` (and `BLUETOOTH_SCAN` for
-//! discovery) at runtime.
+//! Permissions: your app must hold `BLUETOOTH_CONNECT` (and `BLUETOOTH_SCAN` plus
+//! location for discovery) at runtime.
+//!
+//! ```no_run
+//! # #[cfg(feature = "android")]
+//! # async fn demo(vm: std::sync::Arc<jni::JavaVM>, context: jni::objects::GlobalRef,
+//! #               observer: pax_core::SharedObserver) -> Result<(), pax_transport::TransportError> {
+//! use pax_transport::android::AndroidBackend;
+//! use pax_transport::{BluetoothBackend, DiscoveryFilter};
+//!
+//! let backend = AndroidBackend::new(vm, observer)?.with_context(context); // live scan
+//! for d in backend.discover(&DiscoveryFilter::new()).await? {
+//!     println!("{} — {:?}", d.label(), d.platform());
+//! }
+//! # Ok(()) }
+//! ```
 
 mod obex_opp;
 
@@ -31,7 +48,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use jni::objects::{GlobalRef, JObject, JValue};
+use jni::objects::{GlobalRef, JObject, JObjectArray, JValue};
 use jni::JavaVM;
 
 use pax_core::{
@@ -70,6 +87,10 @@ pub struct AndroidBackend {
     spec: SpecContext,
     observer: SharedObserver,
     standards: SharedStandardsResolver,
+    /// An Android `Context`, if supplied — enables live discovery via the
+    /// `dev.pax.PaxBluetooth` companion (see [`AndroidBackend::with_context`]).
+    context: Option<GlobalRef>,
+    discovery_window: std::time::Duration,
     seq: AtomicU64,
 }
 
@@ -114,8 +135,28 @@ impl AndroidBackend {
             spec: SpecContext::new(pax_core::CoreVersion::V5_0, Transport::Dual),
             observer,
             standards: Arc::new(DefaultStandards),
+            context: None,
+            discovery_window: std::time::Duration::from_secs(8),
             seq: AtomicU64::new(0),
         })
+    }
+
+    /// Provide an Android `Context` to enable **live discovery**.
+    ///
+    /// Without a context, [`discover`](BluetoothBackend::discover) lists only
+    /// bonded devices. With one — and the `dev.pax.PaxBluetooth` companion class
+    /// bundled in your app — it also runs a classic inquiry. Create the
+    /// [`GlobalRef`] from your activity/application context with
+    /// `env.new_global_ref(context)?`.
+    pub fn with_context(mut self, context: GlobalRef) -> Self {
+        self.context = Some(context);
+        self
+    }
+
+    /// Set how long live discovery scans before collecting results.
+    pub fn with_discovery_window(mut self, window: std::time::Duration) -> Self {
+        self.discovery_window = window;
+        self
     }
 
     /// Override the controller model used to label events.
@@ -240,6 +281,80 @@ impl AndroidBackend {
         Ok(out)
     }
 
+    /// Run a live classic inquiry through the `dev.pax.PaxBluetooth` companion:
+    /// `startDiscovery`, wait, `drain` the buffered results, `stopDiscovery`.
+    /// Returns `Err` (caller falls back to bonded-only) if the companion class is
+    /// not bundled or any call fails.
+    async fn live_discover(&self) -> Result<Vec<DeviceInfo>> {
+        let context = self
+            .context
+            .as_ref()
+            .ok_or_else(|| TransportError::Unavailable("no Android context".into()))?;
+        const COMPANION: &str = "dev/pax/PaxBluetooth";
+
+        // Start the inquiry.
+        {
+            let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+            let cls = env.find_class(COMPANION).map_err(jerr)?;
+            env.call_static_method(
+                &cls,
+                "startDiscovery",
+                "(Landroid/content/Context;)V",
+                &[JValue::Object(context.as_obj())],
+            )
+            .map_err(jerr)?;
+        }
+
+        tokio::time::sleep(self.discovery_window).await;
+
+        // Drain results and stop.
+        let mut env = self.vm.attach_current_thread().map_err(jerr)?;
+        let cls = env.find_class(COMPANION).map_err(jerr)?;
+        let array: JObjectArray<'_> = env
+            .call_static_method(&cls, "drain", "()[Ljava/lang/String;", &[])
+            .map_err(jerr)?
+            .l()
+            .map_err(jerr)?
+            .into();
+        let _ = env.call_static_method(
+            &cls,
+            "stopDiscovery",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(context.as_obj())],
+        );
+
+        let len = env.get_array_length(&array).map_err(jerr)?;
+        let mut out = Vec::new();
+        for i in 0..len {
+            let el = env.get_object_array_element(&array, i).map_err(jerr)?;
+            let line = match Self::jstring_opt(&mut env, &el) {
+                Some(s) => s,
+                None => continue,
+            };
+            // "address|name|rssi"
+            let mut parts = line.split('|');
+            let addr_s = parts.next().unwrap_or("");
+            let name_s = parts.next().unwrap_or("");
+            let rssi_s = parts.next().unwrap_or("");
+            let addr = match addr_s.parse() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+            let mut info = DeviceInfo::new(DeviceId::public(addr));
+            if !name_s.is_empty() {
+                info.name = Some(name_s.to_string());
+            }
+            // Android sends Short.MIN_VALUE when RSSI is unknown.
+            if let Ok(rssi) = rssi_s.parse::<i16>() {
+                if rssi != i16::MIN {
+                    info.rssi = Some(rssi);
+                }
+            }
+            out.push(info);
+        }
+        Ok(out)
+    }
+
     /// Resolve an address to a `BluetoothDevice` global ref.
     fn remote_device(&self, env: &mut jni::JNIEnv<'_>, target: DeviceId) -> Result<GlobalRef> {
         let addr = env.new_string(target.addr.to_string()).map_err(jerr)?;
@@ -301,8 +416,23 @@ impl BluetoothBackend for AndroidBackend {
 
     async fn discover(&self, filter: &DiscoveryFilter) -> Result<Vec<DeviceInfo>> {
         self.emit(DeviceId::default(), TransitEventKind::DiscoveryStarted);
+
+        // Start from bonded devices, then merge any live-inquiry results (deduped
+        // by address). Live discovery needs a context + the companion class; if
+        // either is absent we silently fall back to bonded-only.
+        let mut devices = self.read_bonded()?;
+        if self.context.is_some() {
+            if let Ok(live) = self.live_discover().await {
+                for info in live {
+                    if !devices.iter().any(|d| d.id == info.id) {
+                        devices.push(info);
+                    }
+                }
+            }
+        }
+
         let mut out = Vec::new();
-        for info in self.read_bonded()? {
+        for info in devices {
             if !filter.accepts(&info) {
                 continue;
             }

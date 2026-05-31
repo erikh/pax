@@ -259,12 +259,17 @@ The same `BluetoothBackend` trait drives the phones' own stacks:
 
   ```rust,ignore
   let vm = std::sync::Arc::new(/* JavaVM from JNI_OnLoad or env.get_java_vm()? */);
-  let backend = pax_transport::android::AndroidBackend::new(vm, observer)?;
+  let backend = pax_transport::android::AndroidBackend::new(vm, observer)?
+      .with_context(context_global_ref);   // optional: enables live discovery
   // discover / pair / upload_file all work through the usual trait.
   ```
 
-  *Limitation:* live inquiry (vs. bonded devices) needs a `BroadcastReceiver`
-  companion in your app — on the roadmap.
+  **Live discovery.** `discover()` lists bonded devices by default. To also run a
+  live classic inquiry (Android only delivers those via `ACTION_FOUND` broadcasts),
+  bundle the companion class
+  [`android-companion/dev/pax/PaxBluetooth.java`](crates/pax-transport/android-companion/dev/pax/PaxBluetooth.java)
+  in your app and pass a `Context` via `.with_context(..)`. The Rust side polls the
+  companion's buffer — no native callbacks, no `RegisterNatives`.
 
 * **`ios`** — CoreBluetooth via `btleplug` (which speaks CoreBluetooth on Apple
   targets). Discover/connect/GATT only. `pair` and `push_file` return `Unsupported`

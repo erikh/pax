@@ -48,7 +48,7 @@ port-auth-nm = ["bluez"]
 ## + RFCOMM + OBEX Object Push. Build for an Android target with the NDK; the
 ## library must be embedded in an app that hands it a `JavaVM`. Compiles on any
 ## host for checking (the `jni` bindings are host-portable).
-android = ["dep:jni"]
+android = ["dep:jni", "dep:tokio"]
 ## The iOS backend (CoreBluetooth, BLE-only) layered over `btleplug`, which speaks
 ## CoreBluetooth on Apple platforms. Discover/connect/GATT only — Apple gives
 ## third-party apps no Classic Bluetooth, OBEX, or programmatic pairing.
