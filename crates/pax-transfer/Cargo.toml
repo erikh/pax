@@ -1,0 +1,18 @@
+[package]
+name = "pax-transfer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "High-level file upload (OBEX Object Push) workflows with progress reporting for the pax Bluetooth toolkit."
+keywords = ["bluetooth", "obex", "file-transfer", "opp"]
+categories = ["network-programming"]
+
+[dependencies]
+pax-core = { workspace = true }
+pax-transport = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }

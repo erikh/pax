@@ -1,0 +1,83 @@
+//! Hardware-gated smoke tests for the real backends.
+//!
+//! These need an actual Bluetooth adapter, so they are `#[ignore]`d by default and
+//! additionally guarded by the `PAX_HW_TESTS` environment variable — they compile
+//! in CI (when the feature is on) but never *run* without hardware. To run them on
+//! a real Linux host:
+//!
+//! ```text
+//! PAX_HW_TESTS=1 cargo test -p pax-transport --features bluez --test hardware -- --ignored --nocapture
+//! PAX_HW_TESTS=1 cargo test -p pax-transport --features btleplug --test hardware -- --ignored --nocapture
+//! ```
+//!
+//! They are deliberately read-only (open the adapter, scan) so they are safe to run
+//! against a daily-driver machine. Pairing and file push are interactive and live
+//! in the manual smoke-test in the README.
+
+#[allow(dead_code)]
+fn hw_enabled() -> bool {
+    std::env::var_os("PAX_HW_TESTS").is_some()
+}
+
+#[cfg(feature = "bluez")]
+mod bluez_hw {
+    use super::hw_enabled;
+    use pax_transport::bluez::BlueZBackend;
+    use pax_transport::{BluetoothBackend, DiscoveryFilter};
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires a real Bluetooth adapter; set PAX_HW_TESTS=1"]
+    async fn adapter_reports_real_controller() {
+        if !hw_enabled() {
+            return;
+        }
+        let backend = BlueZBackend::open().await.expect("open default adapter");
+        let info = backend.adapter().await.expect("read adapter info");
+        println!(
+            "adapter {} — controller {} — spec {}",
+            info.name, info.controller, info.spec
+        );
+        assert!(!info.name.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires a real Bluetooth adapter; set PAX_HW_TESTS=1"]
+    async fn discovery_runs() {
+        if !hw_enabled() {
+            return;
+        }
+        let backend = BlueZBackend::open()
+            .await
+            .expect("open default adapter")
+            .with_discovery_window(std::time::Duration::from_secs(4));
+        let found = backend
+            .discover(&DiscoveryFilter::new().limit(20))
+            .await
+            .expect("discover");
+        println!("discovered {} device(s)", found.len());
+        for d in &found {
+            println!("  {}", d.label());
+        }
+    }
+}
+
+#[cfg(feature = "btleplug")]
+mod btleplug_hw {
+    use super::hw_enabled;
+    use pax_transport::btleplug::BtleplugBackend;
+    use pax_transport::{BluetoothBackend, DiscoveryFilter};
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires a real BLE adapter; set PAX_HW_TESTS=1"]
+    async fn ble_discovery_runs() {
+        if !hw_enabled() {
+            return;
+        }
+        let backend = BtleplugBackend::open().await.expect("open BLE adapter");
+        let found = backend
+            .discover(&DiscoveryFilter::new().limit(20))
+            .await
+            .expect("scan");
+        println!("discovered {} BLE device(s)", found.len());
+    }
+}

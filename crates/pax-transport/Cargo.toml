@@ -1,0 +1,48 @@
+[package]
+name = "pax-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The Bluetooth backend abstraction for the pax toolkit: a mockable async trait plus an always-on deterministic mock backend and optional real BlueZ / btleplug backends."
+keywords = ["bluetooth", "ble", "bluez", "obex", "mock"]
+categories = ["network-programming", "hardware-support"]
+
+[dependencies]
+pax-core = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+# Real-hardware backends and their async runtime are OPTIONAL. The default build
+# pulls none of them, so it compiles with zero system dependencies.
+bluer = { workspace = true, optional = true }
+btleplug = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["time", "rt", "sync"] }
+futures = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+zbus = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+pax-hci = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Tests drive the async trait on a single-threaded runtime; no hardware needed.
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+
+[features]
+default = []
+## Enable the real Linux BlueZ backend (via `bluer`). Requires D-Bus development
+## headers at build time and a running `bluetoothd` at run time. Linux only.
+bluez = ["dep:bluer", "dep:tokio", "dep:futures", "dep:zbus", "dep:libc", "dep:pax-hci"]
+## Enable the cross-platform BLE backend (via `btleplug`). BLE-only: it can scan,
+## connect, and exchange GATT data, but cannot do Classic OBEX file push.
+btleplug = ["dep:btleplug", "dep:tokio", "dep:futures", "dep:uuid"]
+## Convenience: turn on every real backend available on this platform.
+all-backends = ["bluez", "btleplug"]
+## A best-effort `StandardsResolver` that reads 802.1X / PAN auth state from
+## NetworkManager (Linux system bus). Builds on the `bluez` feature's `zbus`.
+port-auth-nm = ["bluez"]
+
+[package.metadata.docs.rs]
+features = ["bluez", "btleplug"]

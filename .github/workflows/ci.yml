@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # The default feature set has zero system dependencies and must build, test,
+  # lint, and document cleanly on every platform with no Bluetooth hardware.
+  default:
+    name: default (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: "-D warnings -D rustdoc::broken_intra_doc_links"
+        run: cargo doc --workspace --no-deps
+
+  # The real backends are Linux-only and need D-Bus development headers. We only
+  # build and lint them here (running them needs a Bluetooth adapter, which CI
+  # runners do not have — see the PAX_HW_TESTS-gated integration tests).
+  backends:
+    name: real backends (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install D-Bus headers
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - name: Build all backends
+        run: cargo build -p pax-transport --features all-backends
+      - name: Clippy all backends
+        run: cargo clippy -p pax-transport --features all-backends --all-targets

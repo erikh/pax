@@ -1,0 +1,25 @@
+[package]
+name = "pax-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core domain types for the pax Bluetooth toolkit: addresses, specs, hardware models, IEEE 802 standards taxonomy, and the in-transit event model."
+keywords = ["bluetooth", "ble", "address", "diagnostics"]
+categories = ["network-programming", "hardware-support"]
+
+# pax-core has NO required third-party dependencies. It is pure, std-only, and
+# compiles anywhere. `serde` is optional and only enables (de)serialization of
+# the domain types and event model.
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+## Derive `serde::Serialize`/`Deserialize` for the public domain and event types.
+serde = ["dep:serde"]
+
+[package.metadata.docs.rs]
+all-features = true

@@ -1,0 +1,54 @@
+# Workspace manifest for `pax` — a Bluetooth toolkit organized as a set of
+# small, single-responsibility crates. See README.md for the consumer-facing
+# guide.
+#
+# Build invariant: the DEFAULT feature set of every crate is pure Rust with no
+# system dependencies, so `cargo build` and `cargo test` work on any machine
+# with no Bluetooth hardware and no D-Bus/BlueZ present. Real hardware backends
+# are opt-in behind cargo features (see `pax-transport`).
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "AGPL-3.0-only"
+repository = "https://github.com/erikh/pax"
+authors = ["pax contributors"]
+description = "A Bluetooth toolkit: pair, push files, and diagnose connections in transit."
+keywords = ["bluetooth", "ble", "bluez", "obex", "diagnostics"]
+categories = ["network-programming", "hardware-support"]
+
+[workspace.dependencies]
+# Internal crates (path + version so the workspace is publishable as a set).
+pax-core = { path = "crates/pax-core", version = "0.1.0" }
+pax-transport = { path = "crates/pax-transport", version = "0.1.0" }
+pax-pairing = { path = "crates/pax-pairing", version = "0.1.0" }
+pax-transfer = { path = "crates/pax-transfer", version = "0.1.0" }
+pax-diagnostics = { path = "crates/pax-diagnostics", version = "0.1.0" }
+pax-hci = { path = "crates/pax-hci", version = "0.1.0" }
+
+# Shared third-party dependencies, version-pinned in one place.
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", default-features = false }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+
+# Real-hardware backends. These are OPTIONAL everywhere and only pulled in by
+# the corresponding cargo features. They require system libraries to build
+# (D-Bus development headers on Linux); see the README.
+# `bluetoothd` is the feature that exposes Session/Adapter/Device/agent over D-Bus.
+bluer = { version = "0.17", features = ["bluetoothd"] }
+btleplug = "0.11"
+# Pure-Rust D-Bus (no libdbus needed) for talking to obexd / NetworkManager.
+# Pinned to 4.x to keep the 1.75 MSRV; the `tokio` feature shares our runtime.
+zbus = { version = "4.4", default-features = false, features = ["tokio"] }
+libc = "0.2"
+uuid = "1"
+
+# Keep debug info modest so a fresh build of the whole workspace is quick.
+[profile.dev]
+debug = 1

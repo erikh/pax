@@ -1,0 +1,19 @@
+[package]
+name = "pax-pairing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Ready-made pairing agents and a retrying pairing workflow for the pax Bluetooth toolkit."
+keywords = ["bluetooth", "pairing", "ssp", "agent"]
+categories = ["network-programming"]
+
+[dependencies]
+pax-core = { workspace = true }
+pax-transport = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }

@@ -1,0 +1,30 @@
+[package]
+name = "pax-diagnostics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Record and analyze in-transit Bluetooth events, split by controller hardware, Bluetooth spec, and IEEE 802 standard."
+keywords = ["bluetooth", "diagnostics", "observability", "802"]
+categories = ["network-programming", "development-tools::debugging"]
+
+[dependencies]
+pax-core = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+## Derive serde on the report types and forward to `pax-core/serde`.
+serde = ["dep:serde", "pax-core/serde"]
+
+[dev-dependencies]
+# The end-to-end test drives the whole toolkit through the mock backend.
+pax-transport = { workspace = true }
+pax-pairing = { workspace = true }
+pax-transfer = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+
+[package.metadata.docs.rs]
+all-features = true

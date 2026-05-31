@@ -1,0 +1,18 @@
+[package]
+name = "pax-hci"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Linux raw HCI management-socket queries for the pax toolkit: read the local Bluetooth controller's version and manufacturer."
+keywords = ["bluetooth", "hci", "bluez", "linux"]
+categories = ["hardware-support", "os::linux-apis"]
+
+# This is the ONLY crate in the workspace that uses `unsafe` (raw `AF_BLUETOOTH`
+# sockets). It is deliberately isolated so the rest of the toolkit can keep its
+# `#![forbid(unsafe_code)]` guarantee. It has no `pax-*` dependencies and returns
+# plain integers, so it is trivial to audit in isolation.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
