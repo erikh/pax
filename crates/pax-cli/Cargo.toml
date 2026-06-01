@@ -1,0 +1,34 @@
+[package]
+name = "pax-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Command-line front-end for the pax Bluetooth toolkit: scan, pair, send files, GATT, and diagnostics."
+keywords = ["bluetooth", "ble", "cli", "gatt", "obex"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "pax"
+path = "src/main.rs"
+
+[dependencies]
+pax-core = { workspace = true }
+pax-transport = { workspace = true }
+pax-pairing = { workspace = true }
+pax-transfer = { workspace = true }
+pax-diagnostics = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+[features]
+# Default = mock backend only, so a plain `cargo build` needs no system deps.
+# Enable a real backend to drive hardware.
+default = []
+bluez = ["pax-transport/bluez"]
+btleplug = ["pax-transport/btleplug"]
+all-backends = ["bluez", "btleplug"]

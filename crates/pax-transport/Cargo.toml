@@ -20,7 +20,9 @@ thiserror = { workspace = true }
 bluer = { workspace = true, optional = true }
 btleplug = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["time", "rt", "sync"] }
-futures = { workspace = true, optional = true }
+# Always on: the GATT notification-stream type lives in the (always-compiled)
+# trait. Pure Rust, no system deps.
+futures = { workspace = true }
 uuid = { workspace = true, optional = true }
 zbus = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
@@ -38,15 +40,18 @@ pax-pairing = { workspace = true }
 default = []
 ## Enable the real Linux BlueZ backend (via `bluer`). Requires D-Bus development
 ## headers at build time and a running `bluetoothd` at run time. Linux only.
-bluez = ["dep:bluer", "dep:tokio", "dep:futures", "dep:zbus", "dep:libc", "dep:pax-hci"]
+bluez = ["dep:bluer", "dep:tokio", "dep:zbus", "dep:libc", "dep:pax-hci"]
 ## Enable the cross-platform BLE backend (via `btleplug`). BLE-only: it can scan,
 ## connect, and exchange GATT data, but cannot do Classic OBEX file push.
-btleplug = ["dep:btleplug", "dep:tokio", "dep:futures", "dep:uuid"]
+btleplug = ["dep:btleplug", "dep:tokio", "dep:uuid"]
 ## Convenience: turn on every desktop backend available on this platform.
 all-backends = ["bluez", "btleplug"]
 ## A best-effort `StandardsResolver` that reads 802.1X / PAN auth state from
 ## NetworkManager (Linux system bus). Builds on the `bluez` feature's `zbus`.
 port-auth-nm = ["bluez"]
+## A precise `StandardsResolver` that reads the 802.1X / EAP state from
+## wpa_supplicant (Linux system bus). Builds on the `bluez` feature's `zbus`.
+port-auth-wpa = ["bluez"]
 ## The Android backend (JNI to `android.bluetooth`). Full: BLE + Classic bonding
 ## + RFCOMM + OBEX Object Push. Build for an Android target with the NDK; the
 ## library must be embedded in an app that hands it a `JavaVM`. Compiles on any
@@ -58,4 +63,4 @@ android = ["dep:jni", "dep:tokio"]
 ios = ["btleplug"]
 
 [package.metadata.docs.rs]
-features = ["bluez", "btleplug", "android", "ios", "port-auth-nm"]
+features = ["bluez", "btleplug", "android", "ios", "port-auth-nm", "port-auth-wpa"]

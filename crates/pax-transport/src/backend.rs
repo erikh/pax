@@ -11,8 +11,12 @@ use async_trait::async_trait;
 
 use pax_core::{
     BdAddr, ControllerModel, DeviceId, DeviceInfo, Duration, EventOrigin, SpecContext,
-    StandardsProfile, Transport,
+    StandardsProfile, Transport, Uuid,
 };
+
+/// A stream of GATT characteristic notifications, each `(characteristic UUID, value)`.
+/// Returned by [`BluetoothBackend::gatt_subscribe`].
+pub type GattNotifications = std::pin::Pin<Box<dyn futures::Stream<Item = (Uuid, Vec<u8>)> + Send>>;
 
 use crate::error::{Result, TransportError};
 use crate::pairing::{PairingAgent, PairingOutcome};
@@ -73,6 +77,9 @@ pub struct Capabilities {
     /// discoverable + pairable so other devices pair *to* it
     /// ([`BluetoothBackend::accept_pairings`]).
     pub can_accept_pairings: bool,
+    /// Whether the backend supports GATT (BLE) read / write / notify
+    /// ([`BluetoothBackend::gatt_read`] etc.).
+    pub can_gatt: bool,
 }
 
 impl Capabilities {
@@ -416,6 +423,56 @@ pub trait BluetoothBackend: Send + Sync {
         Err(TransportError::Unsupported {
             backend: "",
             operation: "accept_pairings",
+        })
+    }
+
+    /// Read a GATT characteristic value on a connected BLE device.
+    ///
+    /// Default: [`TransportError::Unsupported`]. Implemented by BLE backends
+    /// (see [`Capabilities::can_gatt`]).
+    async fn gatt_read(
+        &self,
+        _conn: &Connection,
+        _service: Uuid,
+        _characteristic: Uuid,
+    ) -> Result<Vec<u8>> {
+        Err(TransportError::Unsupported {
+            backend: "",
+            operation: "gatt_read",
+        })
+    }
+
+    /// Write `data` to a GATT characteristic. `with_response` selects a
+    /// write-with-response (acknowledged) vs. write-without-response.
+    ///
+    /// Default: [`TransportError::Unsupported`].
+    async fn gatt_write(
+        &self,
+        _conn: &Connection,
+        _service: Uuid,
+        _characteristic: Uuid,
+        _data: &[u8],
+        _with_response: bool,
+    ) -> Result<()> {
+        Err(TransportError::Unsupported {
+            backend: "",
+            operation: "gatt_write",
+        })
+    }
+
+    /// Subscribe to notifications/indications on a GATT characteristic, returning a
+    /// stream of `(characteristic, value)` updates.
+    ///
+    /// Default: [`TransportError::Unsupported`].
+    async fn gatt_subscribe(
+        &self,
+        _conn: &Connection,
+        _service: Uuid,
+        _characteristic: Uuid,
+    ) -> Result<GattNotifications> {
+        Err(TransportError::Unsupported {
+            backend: "",
+            operation: "gatt_subscribe",
         })
     }
 }

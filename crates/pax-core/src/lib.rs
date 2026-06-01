@@ -58,6 +58,7 @@ pub mod peer;
 pub mod spec;
 pub mod standards;
 pub mod time;
+pub mod uuid;
 
 // A curated prelude-style re-export of the most frequently used types so that
 // downstream code can `use pax_core::{BdAddr, DeviceId, ...}` directly.
@@ -71,3 +72,4 @@ pub use peer::{detect_platform, PeerPlatform};
 pub use spec::{CoreVersion, SpecContext, Transport};
 pub use standards::{PortAuthState, Standard802, StandardsLayer, StandardsProfile};
 pub use time::{Duration, Timestamp};
+pub use uuid::Uuid;

@@ -158,6 +158,7 @@ mod bluez_hw {
 #[cfg(feature = "btleplug")]
 mod btleplug_hw {
     use super::hw_enabled;
+    use pax_core::{DeviceId, Uuid};
     use pax_transport::btleplug::BtleplugBackend;
     use pax_transport::{BluetoothBackend, DiscoveryFilter};
 
@@ -173,5 +174,38 @@ mod btleplug_hw {
             .await
             .expect("scan");
         println!("discovered {} BLE device(s)", found.len());
+    }
+
+    /// Connect to a BLE device and read a GATT characteristic. Set
+    /// `PAX_HW_GATT_ADDR`, `PAX_HW_GATT_SVC`, `PAX_HW_GATT_CHR` (UUIDs, short or
+    /// full); skipped if unset.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "interactive: connects + reads GATT; set PAX_HW_TESTS=1 + PAX_HW_GATT_*"]
+    async fn gatt_read_env() {
+        if !hw_enabled() {
+            return;
+        }
+        let (addr, svc, chr) = match (
+            std::env::var("PAX_HW_GATT_ADDR").ok(),
+            std::env::var("PAX_HW_GATT_SVC").ok(),
+            std::env::var("PAX_HW_GATT_CHR").ok(),
+        ) {
+            (Some(a), Some(s), Some(c)) => (a, s, c),
+            _ => {
+                println!("set PAX_HW_GATT_ADDR/SVC/CHR to run this test");
+                return;
+            }
+        };
+        let target: DeviceId = addr.parse().expect("addr");
+        let svc: Uuid = svc.parse().expect("service uuid");
+        let chr: Uuid = chr.parse().expect("characteristic uuid");
+
+        let backend = BtleplugBackend::open().await.expect("open BLE adapter");
+        // Make sure the device is discovered (so btleplug has a handle), then connect.
+        let _ = backend.discover(&DiscoveryFilter::new()).await;
+        let conn = backend.connect(target).await.expect("connect");
+        let value = backend.gatt_read(&conn, svc, chr).await.expect("gatt read");
+        println!("{chr} = {value:02X?}");
+        let _ = backend.disconnect(&conn).await;
     }
 }

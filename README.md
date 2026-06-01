@@ -39,6 +39,7 @@ Each crate is one responsibility, so you depend on exactly what you use:
 | [`pax-transfer`](crates/pax-transfer) | High-level `upload_file` / `upload_files` with connection lifecycle, retries, and a clean progress callback. | `pax-transport` |
 | [`pax-diagnostics`](crates/pax-diagnostics) | A `Recorder` (observer) plus an `Analyzer` that splits the event stream by **hardware model**, **Bluetooth spec**, and **IEEE 802 standard**. | `pax-core` |
 | [`pax-hci`](crates/pax-hci) | Linux-only helper that reads the local controller's version/manufacturer from the kernel mgmt socket. The **only** crate that uses `unsafe`, isolated so everything else stays `#![forbid(unsafe_code)]`. | — |
+| [`pax-cli`](crates/pax-cli) | The `pax` command-line tool: `scan`, `pair`, `pair-many`, `accept`, `send`, `gatt`, `doctor`. Mock by default; `--features bluez`/`btleplug` for real hardware. | all libs |
 
 ---
 
@@ -446,13 +447,47 @@ pax_transfer::upload_bytes(&backend, id, "hello.txt", b"hi from pax", Default::d
   trivial to audit on its own.
 * **Errors are typed and `#[non_exhaustive]`.** Match with a `_` arm.
 
+## Command line: `pax`
+
+The [`pax-cli`](crates/pax-cli) crate is the `pax` binary. It builds against the
+**mock by default** (no hardware, no system deps); add `--features bluez` /
+`btleplug` to drive a real adapter.
+
+```bash
+cargo run -p pax-cli -- scan                 # dump every device in range
+cargo run -p pax-cli -- pair AA:BB:CC:DD:EE:FF
+cargo run -p pax-cli -- pair-many A B C       # round-robin, concurrent where possible
+cargo run -p pax-cli -- accept --window 30    # inbound "pairing mode"
+cargo run -p pax-cli -- send AA:.. ./file.bin # OBEX Object Push
+cargo run -p pax-cli -- gatt read AA:.. 180a 2a29
+cargo run -p pax-cli -- doctor                # run a session, print a diagnostics report
+# real hardware + the event stream on stderr:
+cargo run -p pax-cli --features bluez -- --backend bluez --verbose scan
+```
+
+## GATT (BLE) read / write / notify
+
+The `btleplug` (and iOS) backend exposes GATT on the trait:
+
+```rust,ignore
+use pax_core::Uuid;
+let conn = backend.connect(id).await?;
+let value = backend.gatt_read(&conn, Uuid::from_u16(0x180A), Uuid::from_u16(0x2A29)).await?;
+backend.gatt_write(&conn, svc, chr, b"\x01", true).await?;          // with response
+let mut notifications = backend.gatt_subscribe(&conn, svc, chr).await?;
+while let Some((uuid, bytes)) = futures::StreamExt::next(&mut notifications).await { /* … */ }
+```
+
+UUIDs accept the canonical 128-bit form or 16-/32-bit short forms (`Uuid::from_u16`,
+or `"180a".parse()`). bluez/android leave GATT `Unsupported` for now.
+
 ## Roadmap
 
-* GATT read/write/notify on the `btleplug` backend.
-* A precise EAP-state source for `port-auth-nm` (wpa_supplicant) instead of the
-  coarse NetworkManager device state.
-* A `pax-cli` binary built on these crates (the libraries are designed to be
-  dropped into a more prescriptive CLI later).
+The three previously-listed roadmap items — GATT, a precise wpa_supplicant EAP
+source ([`port-auth-wpa`](crates/pax-transport)), and the `pax-cli` binary — are
+**done**. What remains is on-device validation that needs a phone / macOS / emulator
+(see *What's verified, and what isn't* above), plus GATT on the BlueZ and Android
+backends.
 
 ## License
 

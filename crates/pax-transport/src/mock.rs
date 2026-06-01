@@ -66,11 +66,12 @@ use std::sync::Arc;
 
 use crate::backend::{
     AdapterInfo, BackendKind, BluetoothBackend, Capabilities, Connection, DiscoveryFilter,
-    InboundPairing,
+    GattNotifications, InboundPairing,
 };
 use crate::error::{Result, TransportError};
 use crate::pairing::{PairingAgent, PairingOutcome, PairingRequest, PairingResponse};
 use crate::transfer::{OutboundFile, TransferReceipt};
+use pax_core::Uuid;
 
 /// The deterministic passkey the mock uses for passkey/numeric-comparison flows.
 pub const MOCK_PASSKEY: u32 = 123_456;
@@ -117,6 +118,10 @@ pub struct MockDevice {
     pub per_chunk_latency: Duration,
     /// If set, a transfer aborts once it would exceed this many bytes.
     pub transfer_failure_after: Option<u64>,
+    /// Scripted GATT characteristic values, keyed by `(service, characteristic)`.
+    pub gatt: HashMap<(pax_core::Uuid, pax_core::Uuid), Vec<u8>>,
+    /// Scripted GATT notifications, in order, keyed by `(service, characteristic)`.
+    pub gatt_notifications: HashMap<(pax_core::Uuid, pax_core::Uuid), Vec<Vec<u8>>>,
 }
 
 impl MockDevice {
@@ -131,7 +136,34 @@ impl MockDevice {
             chunk_size: 1024,
             per_chunk_latency: Duration::from_millis(1),
             transfer_failure_after: None,
+            gatt: HashMap::new(),
+            gatt_notifications: HashMap::new(),
         }
+    }
+
+    /// Builder: script a GATT characteristic value (returned by `gatt_read`).
+    pub fn with_gatt(
+        mut self,
+        service: pax_core::Uuid,
+        characteristic: pax_core::Uuid,
+        value: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.gatt.insert((service, characteristic), value.into());
+        self
+    }
+
+    /// Builder: queue a GATT notification value (yielded by `gatt_subscribe`).
+    pub fn with_notification(
+        mut self,
+        service: pax_core::Uuid,
+        characteristic: pax_core::Uuid,
+        value: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.gatt_notifications
+            .entry((service, characteristic))
+            .or_default()
+            .push(value.into());
+        self
     }
 
     /// Builder: set the device id directly (and reset the contained `DeviceInfo`).
@@ -309,6 +341,7 @@ impl BluetoothBackend for MockBackend {
             // The mock has no real radio, so pairings can run fully concurrently.
             max_concurrent_pairings: usize::MAX,
             can_accept_pairings: true,
+            can_gatt: true,
         }
     }
 
@@ -612,6 +645,68 @@ impl BluetoothBackend for MockBackend {
         self.state.lock().unwrap().clock_ns += opts.window.as_nanos();
         Ok(bonded)
     }
+
+    async fn gatt_read(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+    ) -> Result<Vec<u8>> {
+        let st = self.state.lock().unwrap();
+        let dev = st
+            .devices
+            .iter()
+            .find(|d| d.info.id == conn.peer)
+            .ok_or(TransportError::DeviceNotFound(conn.peer))?;
+        dev.gatt
+            .get(&(service, characteristic))
+            .cloned()
+            .ok_or_else(|| {
+                TransportError::Backend(format!(
+                    "no characteristic {characteristic} on {}",
+                    conn.peer
+                ))
+            })
+    }
+
+    async fn gatt_write(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+        data: &[u8],
+        _with_response: bool,
+    ) -> Result<()> {
+        let mut st = self.state.lock().unwrap();
+        let dev = st
+            .devices
+            .iter_mut()
+            .find(|d| d.info.id == conn.peer)
+            .ok_or(TransportError::DeviceNotFound(conn.peer))?;
+        dev.gatt.insert((service, characteristic), data.to_vec());
+        Ok(())
+    }
+
+    async fn gatt_subscribe(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+    ) -> Result<GattNotifications> {
+        let st = self.state.lock().unwrap();
+        let dev = st
+            .devices
+            .iter()
+            .find(|d| d.info.id == conn.peer)
+            .ok_or(TransportError::DeviceNotFound(conn.peer))?;
+        let values = dev
+            .gatt_notifications
+            .get(&(service, characteristic))
+            .cloned()
+            .unwrap_or_default();
+        let items: Vec<(Uuid, Vec<u8>)> = values.into_iter().map(|v| (characteristic, v)).collect();
+        Ok(Box::pin(futures::stream::iter(items)))
+    }
 }
 
 /// Builder for [`MockBackend`].
@@ -892,5 +987,43 @@ mod tests {
         // The Pixel: name + Android platform inferred from Class-of-Device.
         assert!(report.contains("Pixel 8"));
         assert!(report.contains("Android"));
+    }
+
+    #[tokio::test]
+    async fn gatt_read_write_subscribe() {
+        use futures::StreamExt as _;
+
+        let dev: DeviceId = "AA:00:00:00:00:01".parse().unwrap();
+        let svc = Uuid::from_u16(0x180A);
+        let chr = Uuid::from_u16(0x2A29);
+        let backend = MockBackend::builder()
+            .device(
+                MockDevice::new(dev, "sensor")
+                    .with_gatt(svc, chr, b"ACME".to_vec())
+                    .with_notification(svc, chr, b"n1".to_vec())
+                    .with_notification(svc, chr, b"n2".to_vec()),
+            )
+            .build();
+        let conn = backend.connect(dev).await.unwrap();
+
+        // read the scripted value
+        assert_eq!(backend.gatt_read(&conn, svc, chr).await.unwrap(), b"ACME");
+        // write updates it, read-back confirms
+        backend
+            .gatt_write(&conn, svc, chr, b"NEW", true)
+            .await
+            .unwrap();
+        assert_eq!(backend.gatt_read(&conn, svc, chr).await.unwrap(), b"NEW");
+        // subscribe yields the scripted notifications in order
+        let mut stream = backend.gatt_subscribe(&conn, svc, chr).await.unwrap();
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        while let Some((_uuid, value)) = stream.next().await {
+            got.push(value);
+        }
+        assert_eq!(got, vec![b"n1".to_vec(), b"n2".to_vec()]);
+
+        // an unknown characteristic errors
+        let other = Uuid::from_u16(0xFFFF);
+        assert!(backend.gatt_read(&conn, svc, other).await.is_err());
     }
 }

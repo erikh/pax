@@ -27,10 +27,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use pax_core::{ChipsetFamily, CompanyId, ControllerModel, DeviceId, DeviceInfo, SharedObserver};
+use pax_core::{
+    ChipsetFamily, CompanyId, ControllerModel, DeviceId, DeviceInfo, SharedObserver, Uuid,
+};
 
 use crate::backend::{
     AdapterInfo, BackendKind, BluetoothBackend, Capabilities, Connection, DiscoveryFilter,
+    GattNotifications,
 };
 use crate::btleplug::BtleplugBackend;
 use crate::error::{Result, TransportError};
@@ -76,6 +79,8 @@ impl BluetoothBackend for IosBackend {
             can_push_files: false,
             max_concurrent_pairings: 1,
             can_accept_pairings: false,
+            // CoreBluetooth's core competency — delegated to the inner btleplug.
+            can_gatt: true,
         }
     }
 
@@ -119,5 +124,39 @@ impl BluetoothBackend for IosBackend {
             backend: "ios",
             operation: "push_file (iOS exposes BLE only — no Classic OBEX)",
         })
+    }
+
+    // GATT is CoreBluetooth's whole point — delegate to the inner btleplug backend.
+    async fn gatt_read(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+    ) -> Result<Vec<u8>> {
+        self.inner.gatt_read(conn, service, characteristic).await
+    }
+
+    async fn gatt_write(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+        data: &[u8],
+        with_response: bool,
+    ) -> Result<()> {
+        self.inner
+            .gatt_write(conn, service, characteristic, data, with_response)
+            .await
+    }
+
+    async fn gatt_subscribe(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+    ) -> Result<GattNotifications> {
+        self.inner
+            .gatt_subscribe(conn, service, characteristic)
+            .await
     }
 }

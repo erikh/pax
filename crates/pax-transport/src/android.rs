@@ -386,6 +386,8 @@ impl BluetoothBackend for AndroidBackend {
             can_push_files: true,
             max_concurrent_pairings: 1,
             can_accept_pairings: false,
+            // GATT via JNI is possible but not implemented in this backend yet.
+            can_gatt: false,
         }
     }
 

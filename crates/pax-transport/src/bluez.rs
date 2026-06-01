@@ -55,6 +55,10 @@ mod obex;
 #[cfg(feature = "port-auth-nm")]
 pub mod port_auth;
 
+/// A precise 802.1X / EAP port-auth resolver backed by wpa_supplicant.
+#[cfg(feature = "port-auth-wpa")]
+pub mod wpa;
+
 /// The future type a `bluer` agent callback returns: a boxed, pinned, `Send`
 /// future yielding a `bluer` agent request result.
 type ReqFuture<T> = std::pin::Pin<
@@ -352,6 +356,8 @@ impl BluetoothBackend for BlueZBackend {
             // One controller + one default D-Bus agent => pairing is serialized.
             max_concurrent_pairings: 1,
             can_accept_pairings: true,
+            // GATT over BlueZ is possible but not implemented in this backend yet.
+            can_gatt: false,
         }
     }
 

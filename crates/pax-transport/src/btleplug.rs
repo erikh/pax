@@ -23,15 +23,18 @@ use async_trait::async_trait;
 use pax_core::{
     AddressType, BdAddr, ChipsetFamily, CompanyId, ControllerModel, DeviceId, DeviceInfo,
     EventOrigin, NoopObserver, SharedObserver, SpecContext, StandardsProfile, Timestamp,
-    TransitEvent, TransitEventKind, Transport,
+    TransitEvent, TransitEventKind, Transport, Uuid,
 };
 
-use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter};
-use btleplug::platform::{Adapter, Manager};
+use btleplug::api::{
+    Central, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
+};
+use btleplug::platform::{Adapter, Manager, Peripheral};
+use futures::StreamExt as _;
 
 use crate::backend::{
     AdapterInfo, BackendKind, BluetoothBackend, Capabilities, Connection, DefaultStandards,
-    DiscoveryFilter, SharedStandardsResolver, StaticStandards,
+    DiscoveryFilter, GattNotifications, SharedStandardsResolver, StaticStandards,
 };
 use crate::error::{Result, TransportError};
 use crate::pairing::{PairingAgent, PairingOutcome};
@@ -39,6 +42,16 @@ use crate::transfer::{OutboundFile, TransferReceipt};
 
 fn map_err(e: btleplug::Error) -> TransportError {
     TransportError::Backend(e.to_string())
+}
+
+/// Convert a core [`Uuid`] to a `btleplug`/`uuid` UUID (both big-endian 16 bytes).
+fn to_btle_uuid(u: Uuid) -> uuid::Uuid {
+    uuid::Uuid::from_bytes(*u.as_bytes())
+}
+
+/// Convert a `uuid` UUID to a core [`Uuid`].
+fn from_btle_uuid(u: uuid::Uuid) -> Uuid {
+    Uuid::from_bytes(*u.as_bytes())
 }
 
 /// Convert a `btleplug` address to a core [`BdAddr`].
@@ -127,6 +140,37 @@ impl BtleplugBackend {
         let ev = TransitEvent::new(self.next_seq(), Timestamp::now(), origin, kind);
         self.observer.on_event(&ev);
     }
+
+    /// Find a connected peripheral by address.
+    async fn find_peripheral(&self, addr: BdAddr) -> Result<Peripheral> {
+        for p in self.adapter.peripherals().await.map_err(map_err)? {
+            if let Some(props) = p.properties().await.map_err(map_err)? {
+                if from_btle_addr(props.address) == addr {
+                    return Ok(p);
+                }
+            }
+        }
+        Err(TransportError::NotConnected(DeviceId::public(addr)))
+    }
+
+    /// Discover services on `peripheral` and resolve a `(service, characteristic)`
+    /// pair to a btleplug [`Characteristic`].
+    async fn find_characteristic(
+        &self,
+        peripheral: &Peripheral,
+        service: Uuid,
+        characteristic: Uuid,
+    ) -> Result<Characteristic> {
+        peripheral.discover_services().await.map_err(map_err)?;
+        let (svc, chr) = (to_btle_uuid(service), to_btle_uuid(characteristic));
+        peripheral
+            .characteristics()
+            .into_iter()
+            .find(|c| c.service_uuid == svc && c.uuid == chr)
+            .ok_or_else(|| {
+                TransportError::Backend(format!("characteristic {characteristic} not found"))
+            })
+    }
 }
 
 #[async_trait]
@@ -143,6 +187,7 @@ impl BluetoothBackend for BtleplugBackend {
             can_push_files: false,
             max_concurrent_pairings: 1,
             can_accept_pairings: false,
+            can_gatt: true,
         }
     }
 
@@ -283,5 +328,62 @@ impl BluetoothBackend for BtleplugBackend {
             backend: "btleplug",
             operation: "push_file (OBEX Object Push is BR/EDR-only)",
         })
+    }
+
+    async fn gatt_read(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+    ) -> Result<Vec<u8>> {
+        let p = self.find_peripheral(conn.peer.addr).await?;
+        let chr = self
+            .find_characteristic(&p, service, characteristic)
+            .await?;
+        p.read(&chr).await.map_err(map_err)
+    }
+
+    async fn gatt_write(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+        data: &[u8],
+        with_response: bool,
+    ) -> Result<()> {
+        let p = self.find_peripheral(conn.peer.addr).await?;
+        let chr = self
+            .find_characteristic(&p, service, characteristic)
+            .await?;
+        let kind = if with_response {
+            WriteType::WithResponse
+        } else {
+            WriteType::WithoutResponse
+        };
+        p.write(&chr, data, kind).await.map_err(map_err)
+    }
+
+    async fn gatt_subscribe(
+        &self,
+        conn: &Connection,
+        service: Uuid,
+        characteristic: Uuid,
+    ) -> Result<GattNotifications> {
+        let p = self.find_peripheral(conn.peer.addr).await?;
+        let chr = self
+            .find_characteristic(&p, service, characteristic)
+            .await?;
+        p.subscribe(&chr).await.map_err(map_err)?;
+        let want = to_btle_uuid(characteristic);
+        // btleplug's notifications() stream owns its source, so it outlives `p`.
+        let stream = p
+            .notifications()
+            .await
+            .map_err(map_err)?
+            .filter_map(move |n| {
+                let item = (n.uuid == want).then(|| (from_btle_uuid(n.uuid), n.value));
+                async move { item }
+            });
+        Ok(Box::pin(stream))
     }
 }
