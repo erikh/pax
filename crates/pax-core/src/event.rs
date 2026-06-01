@@ -12,6 +12,7 @@
 //! makes the diagnostics layer testable with no hardware.
 
 use core::fmt;
+use std::borrow::Cow;
 
 use crate::device::DeviceId;
 use crate::hardware::ControllerModel;
@@ -174,7 +175,11 @@ pub enum TransitEventKind {
     /// A non-fatal anomaly worth flagging (e.g. a retransmit, a stall).
     Warning {
         /// A stable short code, e.g. `"stall"` or `"retransmit"`.
-        code: &'static str,
+        ///
+        /// Usually a `&'static str` literal (`"stall".into()` is free); held as a
+        /// [`Cow`] so the type can round-trip through `serde` deserialization,
+        /// which cannot borrow into a `'static` lifetime.
+        code: Cow<'static, str>,
         /// A human-readable detail.
         detail: String,
     },
