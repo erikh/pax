@@ -24,6 +24,7 @@
 //! the capability granted). Without it, [`read_controller_info`] returns `None`
 //! rather than failing loudly — auto-detection is best-effort by design.
 #![cfg_attr(not(target_os = "linux"), allow(unused))]
+#![warn(missing_docs)]
 
 /// What the kernel reports about a local controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

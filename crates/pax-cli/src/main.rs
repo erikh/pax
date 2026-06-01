@@ -46,10 +46,12 @@ struct Cli {
     /// Stream the in-transit event log to stderr.
     #[arg(long, global = true)]
     verbose: bool,
+    /// The subcommand to run.
     #[command(subcommand)]
     command: Command,
 }
 
+/// Which Bluetooth backend the CLI drives.
 #[derive(Copy, Clone, ValueEnum)]
 enum Backend {
     /// The deterministic in-memory mock (scripted demo devices).
@@ -60,15 +62,22 @@ enum Backend {
     Btleplug,
 }
 
+/// The top-level `pax` subcommands.
 #[derive(Subcommand)]
 enum Command {
     /// Scan and dump detailed info for every device in range.
     #[command(alias = "dump")]
     Scan,
     /// Pair with one device.
-    Pair { addr: String },
+    Pair {
+        /// Address of the device to pair with.
+        addr: String,
+    },
     /// Pair with several devices (round-robin, concurrent where the backend allows).
-    PairMany { addrs: Vec<String> },
+    PairMany {
+        /// Addresses of the devices to pair with.
+        addrs: Vec<String>,
+    },
     /// Discover and pair with every device in range.
     PairAll,
     /// Inbound "pairing mode": become discoverable + pairable and accept bonds.
@@ -78,9 +87,15 @@ enum Command {
         window: u64,
     },
     /// Send a file to a device via OBEX Object Push.
-    Send { addr: String, file: PathBuf },
+    Send {
+        /// Address of the device to send the file to.
+        addr: String,
+        /// Path of the file to send.
+        file: PathBuf,
+    },
     /// GATT (BLE) operations.
     Gatt {
+        /// Which GATT operation to perform.
         #[command(subcommand)]
         op: GattOp,
     },
@@ -88,32 +103,44 @@ enum Command {
     Doctor,
 }
 
+/// GATT (BLE) operations for the `gatt` subcommand.
 #[derive(Subcommand)]
 enum GattOp {
     /// Read a characteristic value.
     Read {
+        /// Address of the device to connect to.
         addr: String,
+        /// Service UUID (short or full form).
         service: String,
+        /// Characteristic UUID (short or full form).
         characteristic: String,
     },
     /// Write hex bytes to a characteristic.
     Write {
+        /// Address of the device to connect to.
         addr: String,
+        /// Service UUID (short or full form).
         service: String,
+        /// Characteristic UUID (short or full form).
         characteristic: String,
         /// Hex payload, e.g. `01ff` or `01:ff`.
         hex: String,
     },
     /// Subscribe to notifications and print up to `count` of them.
     Subscribe {
+        /// Address of the device to connect to.
         addr: String,
+        /// Service UUID (short or full form).
         service: String,
+        /// Characteristic UUID (short or full form).
         characteristic: String,
+        /// Stop after printing this many notifications.
         #[arg(long, default_value_t = 5)]
         count: usize,
     },
 }
 
+/// Parse arguments, open the chosen backend, and dispatch the subcommand.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -200,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run one GATT subcommand against the backend.
 async fn gatt(backend: &dyn BluetoothBackend, op: GattOp) -> anyhow::Result<()> {
     match op {
         GattOp::Read {
@@ -258,6 +286,7 @@ async fn gatt(backend: &dyn BluetoothBackend, op: GattOp) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// Print one line per batch-pairing result (id, status, attempt count).
 fn print_items(items: Vec<pax_pairing::PairItem>) {
     for item in items {
         let status = match &item.outcome {
@@ -268,6 +297,7 @@ fn print_items(items: Vec<pax_pairing::PairItem>) {
     }
 }
 
+/// Parse a list of address strings into [`DeviceId`]s.
 fn parse_ids(addrs: &[String]) -> anyhow::Result<Vec<DeviceId>> {
     addrs
         .iter()
@@ -275,6 +305,7 @@ fn parse_ids(addrs: &[String]) -> anyhow::Result<Vec<DeviceId>> {
         .collect()
 }
 
+/// Parse a hex string (ignoring whitespace and `:` separators) into bytes.
 fn parse_hex(s: &str) -> anyhow::Result<Vec<u8>> {
     let s: String = s
         .chars()
@@ -301,6 +332,7 @@ fn default_backend() -> Backend {
     }
 }
 
+/// Open the backend the user selected (or the compiled-in default).
 async fn open_backend(
     choice: Backend,
     observer: SharedObserver,
@@ -312,21 +344,25 @@ async fn open_backend(
     }
 }
 
+/// Open the BlueZ backend, or fail with a rebuild hint if it wasn't compiled in.
 #[cfg(feature = "bluez")]
 async fn open_bluez(observer: SharedObserver) -> anyhow::Result<Arc<dyn BluetoothBackend>> {
     let backend = pax_transport::bluez::BlueZBackend::connect_default(observer).await?;
     Ok(Arc::new(backend) as Arc<dyn BluetoothBackend>)
 }
+/// Open the BlueZ backend, or fail with a rebuild hint if it wasn't compiled in.
 #[cfg(not(feature = "bluez"))]
 async fn open_bluez(_observer: SharedObserver) -> anyhow::Result<Arc<dyn BluetoothBackend>> {
     anyhow::bail!("this build has no `bluez` backend — rebuild with `--features bluez`")
 }
 
+/// Open the btleplug backend, or fail with a rebuild hint if it wasn't compiled in.
 #[cfg(feature = "btleplug")]
 async fn open_btleplug(observer: SharedObserver) -> anyhow::Result<Arc<dyn BluetoothBackend>> {
     let backend = pax_transport::btleplug::BtleplugBackend::connect_first(observer).await?;
     Ok(Arc::new(backend) as Arc<dyn BluetoothBackend>)
 }
+/// Open the btleplug backend, or fail with a rebuild hint if it wasn't compiled in.
 #[cfg(not(feature = "btleplug"))]
 async fn open_btleplug(_observer: SharedObserver) -> anyhow::Result<Arc<dyn BluetoothBackend>> {
     anyhow::bail!("this build has no `btleplug` backend — rebuild with `--features btleplug`")
@@ -366,6 +402,7 @@ fn demo_mock(observer: SharedObserver) -> MockBackend {
 /// Prints every event to stderr (for `--verbose`).
 struct StderrObserver;
 impl Observer for StderrObserver {
+    /// Write one formatted event line to stderr.
     fn on_event(&self, event: &TransitEvent) {
         eprintln!("{event}");
     }
