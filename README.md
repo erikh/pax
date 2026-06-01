@@ -168,8 +168,8 @@ let bonded = backend.accept_pairings(Arc::new(AcceptAllAgent::new()),
 ```
 
 `pair_discovered(backend, filter, agent, opts)` combines discovery with outbound
-batch pairing. Run the hardware-gated tests with `PAX_HW_TESTS=1` plus
-`PAX_HW_PAIR_TARGETS=addr1,addr2` (outbound) or `PAX_HW_PAIR_WINDOW=20` (inbound).
+batch pairing. To exercise either path against real devices, see
+[Live / hardware testing](#live--hardware-testing).
 
 ### 2. Upload files — `pax-transfer`
 
@@ -337,7 +337,9 @@ The same `BluetoothBackend` trait drives the phones' own stacks:
 > the **Java companion compiles `-Werror` against the Android 34 API**. What still
 > needs real hardware is *runtime* behavior — exercised by the `PAX_HW_TESTS`-gated
 > tests in [`crates/pax-transport/tests/hardware.rs`](crates/pax-transport/tests/hardware.rs)
-> and on-device, not by CI. Caveats: the BlueZ controller **version** probe needs
+> and on-device, not by CI (run them yourself — see
+> [Live / hardware testing](#live--hardware-testing)). Caveats: the BlueZ
+> controller **version** probe needs
 > `CAP_NET_ADMIN`, `obexd` must be running for BlueZ file push, the `port-auth-nm`
 > resolver maps a coarse NetworkManager state, and the Android backend must run
 > inside an app that supplies a `JavaVM`.
@@ -402,14 +404,16 @@ let backend = backend.with_standards_resolver(nm);
 
 ## Testing
 
+### Hardware-free (CI / `cargo test`)
+
+The whole toolkit is testable with **no Bluetooth adapter, no D-Bus, and no peer
+device** — the mock backend runs the exact code paths the real backends do:
+
 ```bash
 cargo test                                            # whole workspace, no hardware
 cargo clippy --workspace --all-targets
 cargo build  -p pax-transport --features all-backends # real backends compile + lint
 cargo doc --workspace --no-deps
-
-# On a real Linux host with an adapter (read-only smoke tests):
-PAX_HW_TESTS=1 cargo test -p pax-transport --features bluez --test hardware -- --ignored --nocapture
 ```
 
 The mock backend's virtual clock is deterministic, so diagnostic numbers
@@ -419,9 +423,106 @@ is what makes them assertable in tests. See
 for a full discover → pair → upload → analyze run with two controllers and two
 specs.
 
-### Manual smoke test (real device)
+### Live / hardware testing
 
-Pairing and file push are interactive, so verify them by hand against a phone:
+What the hardware-free suite **cannot** cover is *runtime* behavior against a real
+controller and a real peer (see *[What's verified, and what isn't](#running-on-phones-android--ios)*
+above). There are two ways to drive live hardware, both behind the same backend
+cargo features (`--features bluez` / `btleplug`):
+
+1. **The gated test binary** — `PAX_HW_TESTS`-guarded smoke tests in
+   [`crates/pax-transport/tests/hardware.rs`](crates/pax-transport/tests/hardware.rs).
+2. **The `pax` CLI** — drives a real adapter interactively (see
+   [Command line: `pax`](#command-line-pax)).
+
+#### Prerequisites
+
+| Backend | Build needs | Run needs |
+|---------|-------------|-----------|
+| `bluez` | dbus dev headers (`dbus-devel` / `libdbus-1-dev`) | `bluetoothd` running; `obexd` for file push; **`sudo`** (`CAP_NET_ADMIN`) for the controller *version* probe |
+| `btleplug` | platform BLE toolchain | the platform BLE stack + scan/connect permissions |
+
+#### The gated test suite
+
+These tests are `#[ignore]`d **and** guarded by the `PAX_HW_TESTS` env var, so they
+compile in CI but only *run* when you opt in with both `PAX_HW_TESTS=1` and
+`-- --ignored`. Add `--nocapture` to see the `println!` output (device lists,
+adapter info, bonded ids):
+
+```bash
+# bluez, read-only (open the adapter, scan, dump devices in range) — safe on a daily driver:
+PAX_HW_TESTS=1 cargo test -p pax-transport --features bluez --test hardware -- --ignored --nocapture
+
+# btleplug, read-only (BLE scan):
+PAX_HW_TESTS=1 cargo test -p pax-transport --features btleplug --test hardware -- --ignored --nocapture
+```
+
+Every gated test, what it exercises, and the env vars that drive it:
+
+| Test | Feature | Kind | Extra env vars |
+|------|---------|------|----------------|
+| `adapter_reports_real_controller` | bluez | read-only | — |
+| `discovery_runs` | bluez | read-only | — |
+| `dump_devices_in_range` | bluez | read-only | — |
+| `inbound_pairing_mode` | bluez | **interactive** — makes the adapter discoverable + pairable; pair a phone *to* it | `PAX_HW_PAIR_WINDOW` (seconds, default 20) |
+| `outbound_batch_pairing` | bluez | **interactive** — pairs the listed devices | `PAX_HW_PAIR_TARGETS=AA:BB:..,CC:DD:..` (skipped if unset) |
+| `ble_discovery_runs` | btleplug | read-only | — |
+| `gatt_read_env` | btleplug | **interactive** — connect + read one GATT characteristic | `PAX_HW_GATT_ADDR`, `PAX_HW_GATT_SVC`, `PAX_HW_GATT_CHR` (skipped if unset) |
+
+Run a single interactive test by naming it and supplying its env vars:
+
+```bash
+# Inbound "pairing mode": be pairable for 30s, then pair a phone to this laptop.
+PAX_HW_TESTS=1 PAX_HW_PAIR_WINDOW=30 \
+  cargo test -p pax-transport --features bluez --test hardware \
+  inbound_pairing_mode -- --ignored --nocapture
+
+# Outbound batch: pair a known list of devices, round-robin.
+PAX_HW_TESTS=1 PAX_HW_PAIR_TARGETS=AA:BB:CC:DD:EE:FF,11:22:33:44:55:66 \
+  cargo test -p pax-transport --features bluez --test hardware \
+  outbound_batch_pairing -- --ignored --nocapture
+
+# GATT read: connect to a BLE device and read service 180a / characteristic 2a29.
+PAX_HW_TESTS=1 PAX_HW_GATT_ADDR=AA:BB:CC:DD:EE:FF PAX_HW_GATT_SVC=180a PAX_HW_GATT_CHR=2a29 \
+  cargo test -p pax-transport --features btleplug --test hardware \
+  gatt_read_env -- --ignored --nocapture
+```
+
+UUIDs accept the short (`180a`) or full 128-bit form.
+
+#### Env-var reference
+
+Single source of truth for the hardware-test env vars:
+
+| Variable | Used by | Meaning |
+|----------|---------|---------|
+| `PAX_HW_TESTS` | all gated tests | master gate — any value lets the gated tests run (still needs `-- --ignored`) |
+| `PAX_HW_PAIR_WINDOW` | `inbound_pairing_mode` | seconds to stay pairable (default 20) |
+| `PAX_HW_PAIR_TARGETS` | `outbound_batch_pairing` | comma-separated device addresses to pair |
+| `PAX_HW_GATT_ADDR` | `gatt_read_env` | BLE device address to connect to |
+| `PAX_HW_GATT_SVC` | `gatt_read_env` | GATT service UUID (short or full) |
+| `PAX_HW_GATT_CHR` | `gatt_read_env` | GATT characteristic UUID (short or full) |
+
+#### Driving live hardware with the `pax` CLI
+
+The CLI runs every workflow against a real adapter when built with a backend
+feature; `--backend` picks it and `--verbose` streams the in-transit event log to
+stderr:
+
+```bash
+cargo run -p pax-cli --features bluez -- --backend bluez --verbose scan
+cargo run -p pax-cli --features bluez -- --backend bluez pair AA:BB:CC:DD:EE:FF
+cargo run -p pax-cli --features bluez -- --backend bluez accept --window 30
+cargo run -p pax-cli --features bluez -- --backend bluez send AA:.. ./file.bin
+cargo run -p pax-cli --features btleplug -- --backend btleplug gatt read AA:.. 180a 2a29
+```
+
+See [Command line: `pax`](#command-line-pax) for the full subcommand list.
+
+#### Manual smoke test (real device, from Rust)
+
+Pairing and file push are interactive, so you can also verify them by hand against
+a phone from your own binary:
 
 ```rust,ignore
 let backend = pax_transport::bluez::BlueZBackend::open().await?;       // real adapter
