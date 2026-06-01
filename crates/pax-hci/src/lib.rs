@@ -247,7 +247,10 @@ mod linux {
     const HCI_DEV_NONE: u16 = 0xffff;
     const MGMT_OP_READ_INFO: u16 = 0x0004;
     const MGMT_OP_SET_POWERED: u16 = 0x0005;
-    const MGMT_OP_SET_PUBLIC_ADDRESS: u16 = 0x0050;
+    // Per the kernel's `include/net/bluetooth/mgmt.h`. NB: this is 0x0039, *not*
+    // 0x0050 (which is a different, parameterless command — sending it a 6-byte
+    // address gets rejected with INVALID_PARAMS, 0x0d).
+    const MGMT_OP_SET_PUBLIC_ADDRESS: u16 = 0x0039;
     const MGMT_EV_CMD_COMPLETE: u16 = 0x0001;
     const MGMT_EV_CMD_STATUS: u16 = 0x0002;
 
@@ -309,14 +312,29 @@ mod linux {
         Ok(guard)
     }
 
-    /// Write one `mgmt` command (header + params) to the bound socket.
-    unsafe fn write_command(fd: RawFd, opcode: u16, index: u16, params: &[u8]) -> io::Result<()> {
-        // mgmt command header: opcode(2, LE), controller index(2, LE), param len(2, LE).
+    /// Build the on-the-wire bytes of one `mgmt` command: a 6-byte header
+    /// (opcode, controller index, param length — each little-endian) followed by
+    /// the parameters. Pure, so the framing can be unit-tested without a socket.
+    fn encode_command(opcode: u16, index: u16, params: &[u8]) -> Vec<u8> {
         let mut cmd = Vec::with_capacity(6 + params.len());
         cmd.extend_from_slice(&opcode.to_le_bytes());
         cmd.extend_from_slice(&index.to_le_bytes());
         cmd.extend_from_slice(&(params.len() as u16).to_le_bytes());
         cmd.extend_from_slice(params);
+        cmd
+    }
+
+    /// A display-order (MSB-first) address as the little-endian (LSB-first) bytes
+    /// the mgmt `bdaddr_t` wire format expects.
+    fn bdaddr_le(addr: [u8; 6]) -> [u8; 6] {
+        let mut le = addr;
+        le.reverse();
+        le
+    }
+
+    /// Write one `mgmt` command (header + params) to the bound socket.
+    unsafe fn write_command(fd: RawFd, opcode: u16, index: u16, params: &[u8]) -> io::Result<()> {
+        let cmd = encode_command(opcode, index, params);
         let written = libc::write(fd, cmd.as_ptr() as *const libc::c_void, cmd.len());
         if written < 0 {
             return Err(io::Error::last_os_error());
@@ -375,9 +393,7 @@ mod linux {
     pub fn set_public_address(index: u16, addr: [u8; 6]) -> Result<(), SetAddressError> {
         // mgmt carries bdaddr_t little-endian (LSB first); our input is display
         // order (MSB first), so reverse before sending.
-        let mut le = addr;
-        le.reverse();
-        run_command(MGMT_OP_SET_PUBLIC_ADDRESS, index, &le)
+        run_command(MGMT_OP_SET_PUBLIC_ADDRESS, index, &bdaddr_le(addr))
     }
 
     pub fn set_powered(index: u16, on: bool) -> Result<(), SetAddressError> {
@@ -437,6 +453,53 @@ mod linux {
             io::ErrorKind::TimedOut,
             "no mgmt command-complete for the requested opcode",
         )))
+    }
+
+    #[cfg(test)]
+    mod wire_tests {
+        use super::*;
+
+        /// Regression guard for the opcode bug: `Set Public Address` is mgmt
+        /// command 0x0039. We once used 0x0050 (a different, parameterless
+        /// command), so the kernel rejected the 6-byte payload with
+        /// INVALID_PARAMS (0x0d). This pins both the opcode and the full wire
+        /// framing — header (little-endian opcode/index/len) plus the address in
+        /// little-endian (reversed from display order).
+        #[test]
+        fn set_public_address_command_is_framed_correctly() {
+            assert_eq!(MGMT_OP_SET_PUBLIC_ADDRESS, 0x0039);
+
+            // Display order 1E:03:E0:D2:10:CB -> little-endian on the wire.
+            let addr = [0x1E, 0x03, 0xE0, 0xD2, 0x10, 0xCB];
+            assert_eq!(bdaddr_le(addr), [0xCB, 0x10, 0xD2, 0xE0, 0x03, 0x1E]);
+
+            let cmd = encode_command(MGMT_OP_SET_PUBLIC_ADDRESS, 0, &bdaddr_le(addr));
+            assert_eq!(
+                cmd,
+                vec![
+                    0x39, 0x00, // opcode 0x0039, little-endian
+                    0x00, 0x00, // controller index 0
+                    0x06, 0x00, // parameter length 6
+                    0xCB, 0x10, 0xD2, 0xE0, 0x03, 0x1E, // bdaddr, little-endian
+                ]
+            );
+        }
+
+        /// The other commands we send keep their (correct, already-working)
+        /// opcodes and framing — a header-only command has param length 0.
+        #[test]
+        fn read_info_and_set_powered_framing() {
+            assert_eq!(MGMT_OP_READ_INFO, 0x0004);
+            assert_eq!(MGMT_OP_SET_POWERED, 0x0005);
+            assert_eq!(
+                encode_command(MGMT_OP_READ_INFO, 0, &[]),
+                vec![0x04, 0x00, 0x00, 0x00, 0x00, 0x00]
+            );
+            assert_eq!(
+                encode_command(MGMT_OP_SET_POWERED, 0, &[1]),
+                vec![0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]
+            );
+        }
     }
 }
 
