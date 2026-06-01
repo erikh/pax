@@ -7,14 +7,19 @@
 #     make install FEATURES=all-backends     # bluez + btleplug (needs libdbus)
 #     make install FEATURES=btleplug         # cross-platform BLE only
 #
-# Install location follows the usual PREFIX / DESTDIR conventions:
+# Install location is chosen by who you are: as root it goes system-wide
+# (/usr/local), otherwise into your home directory (no sudo needed). Override
+# PREFIX (and DESTDIR) to force a location, following the usual conventions:
 #
-#     make install                    # -> /usr/local/bin/pax
-#     make install PREFIX=~/.local    # -> ~/.local/bin/pax
-#     sudo make install PREFIX=/usr   # -> /usr/bin/pax
+#     make install                    # -> ~/.local/bin/pax  (regular user)
+#     sudo make install               # -> /usr/local/bin/pax  (root)
+#     make install PREFIX=/usr        # -> /usr/bin/pax
+#
+# Make sure ~/.local/bin is on your PATH for the regular-user install.
 
 CARGO   ?= cargo
-PREFIX  ?= /usr/local
+# Default PREFIX: system-wide for root (uid 0), user-local for everyone else.
+PREFIX  ?= $(shell [ "$$(id -u)" -eq 0 ] && echo /usr/local || echo $(HOME)/.local)
 DESTDIR ?=
 BINDIR   = $(DESTDIR)$(PREFIX)/bin
 
