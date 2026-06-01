@@ -202,6 +202,15 @@ impl BlueZBackend {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// The controller's HCI index, parsed from the adapter name (e.g. `hci0` → 0).
+    /// Needed to address the kernel mgmt socket for [`Self::set_local_address`].
+    fn hci_index(&self) -> Option<u16> {
+        self.adapter
+            .name()
+            .strip_prefix("hci")
+            .and_then(|n| n.parse::<u16>().ok())
+    }
+
     fn emit(&self, peer: DeviceId, kind: TransitEventKind) {
         let origin = EventOrigin::new(
             self.controller.clone(),
@@ -358,6 +367,10 @@ impl BluetoothBackend for BlueZBackend {
             can_accept_pairings: true,
             // GATT over BlueZ is possible but not implemented in this backend yet.
             can_gatt: false,
+            // The kernel mgmt socket (via `pax-hci`) can reprogram the controller
+            // address. Needs CAP_NET_ADMIN and a controller whose driver supports
+            // it; a run-time rejection surfaces as `TransportError::LocalAddress`.
+            can_spoof_address: true,
         }
     }
 
@@ -373,6 +386,27 @@ impl BluetoothBackend for BlueZBackend {
 
     async fn set_powered(&self, on: bool) -> Result<()> {
         self.adapter.set_powered(on).await.map_err(map_err)
+    }
+
+    async fn set_local_address(&self, addr: BdAddr) -> Result<()> {
+        let index = self.hci_index().ok_or_else(|| {
+            TransportError::LocalAddress(format!(
+                "cannot derive an HCI index from adapter name {:?}",
+                self.adapter.name()
+            ))
+        })?;
+        // `pax_hci` power-cycles the controller and reprograms its public address
+        // over the kernel mgmt socket. That is blocking socket I/O, so run it off
+        // the async reactor.
+        let octets = addr.octets();
+        tokio::task::spawn_blocking(move || pax_hci::spoof_public_address(index, octets))
+            .await
+            .map_err(|e| TransportError::LocalAddress(format!("spoof task failed: {e}")))?
+            .map_err(|e| TransportError::LocalAddress(e.to_string()))?;
+        // The mgmt power-cycle happened underneath BlueZ; make sure bluetoothd sees
+        // the adapter powered again so subsequent operations work.
+        self.adapter.set_powered(true).await.map_err(map_err)?;
+        Ok(())
     }
 
     async fn discover(&self, filter: &DiscoveryFilter) -> Result<Vec<DeviceInfo>> {

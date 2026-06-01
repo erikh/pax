@@ -112,6 +112,47 @@ mod bluez_hw {
         }
     }
 
+    /// Spoof the local controller address and restore it. **Mutating** — unlike
+    /// the other bluez tests this reprograms the adapter, so it is gated by an
+    /// extra `PAX_HW_SPOOF=1` opt-in on top of `PAX_HW_TESTS`, and it needs root
+    /// (`CAP_NET_ADMIN`) plus a controller whose driver supports the change. It
+    /// reads the current address, sets a locally-administered test address,
+    /// verifies the change, then restores the original.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "MUTATES the adapter address; set PAX_HW_TESTS=1 PAX_HW_SPOOF=1 (needs root)"]
+    async fn spoof_local_address_roundtrip() {
+        if !hw_enabled() || std::env::var_os("PAX_HW_SPOOF").is_none() {
+            return;
+        }
+        use pax_core::BdAddr;
+
+        let backend = BlueZBackend::open().await.expect("open default adapter");
+        assert!(
+            backend.capabilities().can_spoof_address,
+            "bluez should advertise spoofing support"
+        );
+
+        let original = backend.adapter().await.expect("read adapter").address;
+        println!("original address: {original}");
+
+        // A locally-administered test address (bit 0x02 of the top octet).
+        let test: BdAddr = "02:00:00:13:37:01".parse().unwrap();
+        backend
+            .set_local_address(test)
+            .await
+            .expect("set test address (needs root + supported controller)");
+        let now = backend.adapter().await.expect("read adapter").address;
+        println!("after spoof: {now}");
+        assert_eq!(now, test, "controller did not take the spoofed address");
+
+        // Always try to restore the original so the machine is left as we found it.
+        backend
+            .set_local_address(original)
+            .await
+            .expect("restore original address");
+        assert_eq!(backend.adapter().await.unwrap().address, original);
+    }
+
     /// Outbound batch (round-robin) pairing. Set
     /// `PAX_HW_PAIR_TARGETS=AA:BB:..,CC:DD:..` to a comma-separated list of device
     /// addresses to pair; skipped if unset.

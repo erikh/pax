@@ -544,8 +544,9 @@ pax_transfer::upload_bytes(&backend, id, "hello.txt", b"hi from pax", Default::d
 * **Observability is a sink, not a return value.** Backends emit `TransitEvent`s to
   an `Observer`; compose `FanOut` to log, show progress, and record at once.
 * **`#![forbid(unsafe_code)]` everywhere except [`pax-hci`](crates/pax-hci)** — the
-  one crate that needs a raw socket, deliberately isolated and ~150 lines so it is
-  trivial to audit on its own.
+  one crate that needs raw `AF_BLUETOOTH` sockets (to read controller info and to
+  reprogram the local address), deliberately isolated and small so it is trivial to
+  audit on its own.
 * **Errors are typed and `#[non_exhaustive]`.** Match with a `_` arm.
 
 ## Command line: `pax`
@@ -562,6 +563,8 @@ cargo run -p pax-cli -- accept --window 30    # inbound "pairing mode"
 cargo run -p pax-cli -- send AA:.. ./file.bin # OBEX Object Push
 cargo run -p pax-cli -- gatt read AA:.. 180a 2a29
 cargo run -p pax-cli -- doctor                # run a session, print a diagnostics report
+cargo run -p pax-cli -- spoof 02:00:00:11:22:33      # impersonate a local address
+cargo run -p pax-cli -- --spoof 02:00:00:11:22:33 scan  # …or run any command under one
 # real hardware + the event stream on stderr:
 cargo run -p pax-cli --features bluez -- --backend bluez --verbose scan
 ```
@@ -581,6 +584,58 @@ while let Some((uuid, bytes)) = futures::StreamExt::next(&mut notifications).awa
 
 UUIDs accept the canonical 128-bit form or 16-/32-bit short forms (`Uuid::from_u16`,
 or `"180a".parse()`). bluez/android leave GATT `Unsupported` for now.
+
+## Impersonating a local address
+
+The toolkit can present an arbitrary **local** `BD_ADDR` — useful for privacy,
+device migration, testing a peer's bonding/allow-list logic, and authorized
+security research. It changes *your own* controller's identity; it never touches a
+remote device.
+
+It is a **backend capability**, so an impossible request fails fast instead of
+silently doing nothing. Query `capabilities().can_spoof_address`, or just use the
+capability-checked helpers:
+
+| Backend | Spoofing | How |
+|---------|----------|-----|
+| `bluez` | ✅ (Linux, needs root / `CAP_NET_ADMIN`, driver-dependent) | kernel mgmt socket via [`pax-hci`](crates/pax-hci) |
+| `mock`  | ✅ (simulated) | records the address; great for tests |
+| `btleplug` / `android` / `ios` | ❌ (no OS mechanism) | returns `Unsupported` |
+
+```rust,ignore
+use pax_transport::{apply_spoof, discover_as, connect_as, BluetoothBackend};
+use pax_core::BdAddr;
+
+let alias: BdAddr = "02:00:00:11:22:33".parse()?;
+
+// Set it once (adapter-global), then everything afterward runs under `alias`:
+backend.set_local_address(alias).await?;            // raw trait method
+// …or apply it inline to a specific operation (capability-checked):
+let devices = discover_as(&*backend, Some(alias), &DiscoveryFilter::new()).await?;
+let conn    = connect_as(&*backend, Some(alias), target).await?;   // then GATT, etc.
+```
+
+Pairing takes it as an option, applied once before the (possibly retried) bond:
+
+```rust,ignore
+use pax_pairing::{pair_device, PairOptions};
+let report = pair_device(&*backend, target, agent,
+                         PairOptions::default().spoofing(alias)).await?;
+```
+
+On the command line, `--spoof <ADDR>` runs any command under the address, and the
+`spoof` subcommand sets it and exits. Selecting a backend that can't do it errors
+up front:
+
+```bash
+pax --backend bluez --spoof 02:00:00:11:22:33 pair AA:BB:CC:DD:EE:FF   # pair as a different address
+pax --backend bluez spoof 02:00:00:11:22:33                            # set + persist on the adapter
+pax --backend btleplug --spoof 02:00:00:11:22:33 scan
+#   error: the `btleplug` backend cannot spoof a local address — use --backend bluez (Linux) or --backend mock
+```
+
+The change does **not** survive a controller reset/reboot, and `bluetoothd` may
+re-assert the address when it next manages the adapter — re-apply as needed.
 
 ## Roadmap
 

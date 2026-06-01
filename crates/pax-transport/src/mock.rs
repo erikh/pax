@@ -258,7 +258,9 @@ struct MockState {
 /// The deterministic in-memory backend. Build one with [`MockBackend::builder`].
 pub struct MockBackend {
     name: String,
-    adapter_address: BdAddr,
+    /// The local adapter address. Behind a mutex because
+    /// [`MockBackend::set_local_address`] can spoof it at run time.
+    adapter_address: Mutex<BdAddr>,
     adapter_name: String,
     controller: ControllerModel,
     spec: SpecContext,
@@ -342,12 +344,15 @@ impl BluetoothBackend for MockBackend {
             max_concurrent_pairings: usize::MAX,
             can_accept_pairings: true,
             can_gatt: true,
+            // The mock has no real radio; it simulates spoofing by recording the
+            // address, which keeps the spoofing pipeline testable with no hardware.
+            can_spoof_address: true,
         }
     }
 
     async fn adapter(&self) -> Result<AdapterInfo> {
         Ok(AdapterInfo {
-            address: self.adapter_address,
+            address: *self.adapter_address.lock().unwrap(),
             name: self.adapter_name.clone(),
             controller: self.controller.clone(),
             spec: self.spec,
@@ -357,6 +362,13 @@ impl BluetoothBackend for MockBackend {
 
     async fn set_powered(&self, on: bool) -> Result<()> {
         *self.powered.lock().unwrap() = on;
+        Ok(())
+    }
+
+    async fn set_local_address(&self, addr: BdAddr) -> Result<()> {
+        // Simulated: record the spoofed address so `adapter()` reflects it. A real
+        // backend would reprogram the controller here.
+        *self.adapter_address.lock().unwrap() = addr;
         Ok(())
     }
 
@@ -796,7 +808,7 @@ impl MockBackendBuilder {
     pub fn build(self) -> MockBackend {
         MockBackend {
             name: self.name,
-            adapter_address: self.adapter_address,
+            adapter_address: Mutex::new(self.adapter_address),
             adapter_name: self.adapter_name,
             controller: self.controller,
             spec: self.spec,
@@ -987,6 +999,35 @@ mod tests {
         // The Pixel: name + Android platform inferred from Class-of-Device.
         assert!(report.contains("Pixel 8"));
         assert!(report.contains("Android"));
+    }
+
+    #[tokio::test]
+    async fn set_local_address_spoofs_the_adapter() {
+        use crate::backend::{apply_spoof, discover_as};
+
+        let backend = MockBackend::builder()
+            .adapter_address(BdAddr::new([0x00, 0x00, 0x00, 0x00, 0x00, 0x01]))
+            .device(MockDevice::new(phone(), "Phone"))
+            .build();
+
+        // The mock advertises spoofing support.
+        assert!(backend.capabilities().can_spoof_address);
+
+        let spoofed: BdAddr = "02:00:00:DE:AD:BE".parse().unwrap();
+        backend.set_local_address(spoofed).await.unwrap();
+        assert_eq!(backend.adapter().await.unwrap().address, spoofed);
+
+        // The capability-checked helper also applies it, and `discover_as` scans
+        // under the impersonated identity.
+        let other: BdAddr = "02:00:00:00:00:99".parse().unwrap();
+        apply_spoof(&backend, Some(other)).await.unwrap();
+        assert_eq!(backend.adapter().await.unwrap().address, other);
+
+        let found = discover_as(&backend, Some(spoofed), &DiscoveryFilter::new())
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(backend.adapter().await.unwrap().address, spoofed);
     }
 
     #[tokio::test]

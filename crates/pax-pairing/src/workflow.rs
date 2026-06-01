@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
-use pax_core::DeviceId;
+use pax_core::{BdAddr, DeviceId};
 use pax_transport::pairing::{PairingAgent, PairingOutcome};
-use pax_transport::{BluetoothBackend, DiscoveryFilter, TransportError};
+use pax_transport::{apply_spoof, BluetoothBackend, DiscoveryFilter, TransportError};
 
 /// Tunables for [`pair_device`].
 #[derive(Clone, Copy, Debug)]
@@ -17,11 +17,28 @@ pub struct PairOptions {
     /// How many *extra* attempts to make after the first failure (so `retries: 2`
     /// means up to three attempts total). Only transient failures are retried.
     pub retries: u32,
+    /// Optionally **impersonate** this local address before pairing, so the peer
+    /// sees the bond coming from `spoof_local` rather than the real adapter. The
+    /// backend must support it ([`Capabilities::can_spoof_address`](pax_transport::Capabilities));
+    /// `None` (the default) pairs under the real address. The change is adapter-
+    /// global and applied once before the first attempt.
+    pub spoof_local: Option<BdAddr>,
 }
 
 impl Default for PairOptions {
     fn default() -> Self {
-        PairOptions { retries: 2 }
+        PairOptions {
+            retries: 2,
+            spoof_local: None,
+        }
+    }
+}
+
+impl PairOptions {
+    /// Builder: impersonate `addr` as the local address before pairing.
+    pub fn spoofing(mut self, addr: BdAddr) -> Self {
+        self.spoof_local = Some(addr);
+        self
     }
 }
 
@@ -64,6 +81,10 @@ pub async fn pair_device(
     agent: Arc<dyn PairingAgent>,
     options: PairOptions,
 ) -> Result<PairReport, TransportError> {
+    // Apply the optional local-address spoof once, before any attempt. Fails fast
+    // (with a clear error) if the backend cannot impersonate an address.
+    apply_spoof(backend, options.spoof_local).await?;
+
     let max_attempts = options.retries.saturating_add(1);
     let mut last_err = None;
 
@@ -197,6 +218,24 @@ pub async fn pair_devices(
         );
     }
 
+    // Apply the local-address spoof **once** for the whole batch (it is adapter-
+    // global), then clear it so the concurrent per-device calls below do not each
+    // re-program the controller. If it fails, every target fails with that error.
+    let mut per_device = options.per_device;
+    if let Some(addr) = per_device.spoof_local.take() {
+        if let Err(e) = apply_spoof(backend, Some(addr)).await {
+            let msg = e.to_string();
+            return order
+                .into_iter()
+                .map(|id| PairItem {
+                    id,
+                    outcome: Err(TransportError::LocalAddress(msg.clone())),
+                    attempts: 0,
+                })
+                .collect();
+        }
+    }
+
     let mut pending: Vec<DeviceId> = order.clone();
     let rounds = options.rounds.max(1);
     for _round in 0..rounds {
@@ -211,7 +250,7 @@ pub async fn pair_devices(
                     async move {
                         (
                             id,
-                            pair_device(backend, id, agent, options.per_device).await,
+                            pair_device(backend, id, agent, per_device).await,
                         )
                     }
                 })
@@ -245,6 +284,12 @@ pub async fn pair_discovered(
     agent: Arc<dyn PairingAgent>,
     options: BatchPairOptions,
 ) -> Result<Vec<PairItem>, TransportError> {
+    // Spoof (if requested) *before* discovery so the scan also runs under the
+    // impersonated identity; then clear it so `pair_devices` does not re-apply.
+    let mut options = options;
+    let spoof = options.per_device.spoof_local.take();
+    apply_spoof(backend, spoof).await?;
+
     let found = backend.discover(filter).await?;
     let targets: Vec<DeviceId> = found.iter().map(|d| d.id).collect();
     Ok(pair_devices(backend, &targets, agent, options).await)
@@ -288,7 +333,15 @@ mod tests {
             .device(MockDevice::new(id(), "no"))
             .build();
         let agent = Arc::new(RejectAllAgent);
-        let err = pair_device(&backend, id(), agent, PairOptions { retries: 5 })
+        let err = pair_device(
+            &backend,
+            id(),
+            agent,
+            PairOptions {
+                retries: 5,
+                ..Default::default()
+            },
+        )
             .await
             .unwrap_err();
         assert!(matches!(err, TransportError::PairingRejected(_)));
@@ -300,7 +353,15 @@ mod tests {
             .device(MockDevice::new(id(), "flaky").failing_pairing("device busy"))
             .build();
         let agent = Arc::new(AcceptAllAgent::new());
-        let err = pair_device(&backend, id(), agent, PairOptions { retries: 2 })
+        let err = pair_device(
+            &backend,
+            id(),
+            agent,
+            PairOptions {
+                retries: 2,
+                ..Default::default()
+            },
+        )
             .await
             .unwrap_err();
         assert!(matches!(err, TransportError::PairingFailed(_)));
@@ -363,6 +424,46 @@ mod tests {
         assert!(results[2].paired());
         // The failing device was attempted every round (default rounds = 2).
         assert_eq!(results[1].attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn pair_device_applies_spoof_before_pairing() {
+        use pax_core::BdAddr;
+        let backend = MockBackend::builder()
+            .device(MockDevice::new(id(), "ok"))
+            .build();
+        let spoof: BdAddr = "02:00:00:AB:CD:EF".parse().unwrap();
+        let report = pair_device(
+            &backend,
+            id(),
+            Arc::new(AcceptAllAgent::new()),
+            PairOptions::default().spoofing(spoof),
+        )
+        .await
+        .unwrap();
+        assert!(report.outcome.bonded);
+        // The bond ran under the impersonated local address.
+        assert_eq!(backend.adapter().await.unwrap().address, spoof);
+    }
+
+    #[tokio::test]
+    async fn batch_pair_applies_spoof_once() {
+        use pax_core::BdAddr;
+        let targets = ids(3);
+        let backend = backend_with(&targets);
+        let spoof: BdAddr = "02:00:00:11:22:33".parse().unwrap();
+        let results = pair_devices(
+            &backend,
+            &targets,
+            Arc::new(AcceptAllAgent::new()),
+            BatchPairOptions {
+                per_device: PairOptions::default().spoofing(spoof),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(results.iter().all(|r| r.paired()));
+        assert_eq!(backend.adapter().await.unwrap().address, spoof);
     }
 
     #[tokio::test]

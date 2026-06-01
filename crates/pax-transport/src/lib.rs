@@ -68,9 +68,10 @@ pub mod android;
 pub mod ios;
 
 pub use backend::{
-    dump_in_range, AdapterInfo, BackendKind, BluetoothBackend, Capabilities, Connection,
-    DefaultStandards, DiscoveryFilter, GattNotifications, InboundPairing, SharedStandardsResolver,
-    StandardsFn, StandardsResolver, StaticStandards,
+    apply_spoof, connect_as, discover_as, dump_in_range, dump_in_range_as, AdapterInfo,
+    BackendKind, BluetoothBackend, Capabilities, Connection, DefaultStandards, DiscoveryFilter,
+    GattNotifications, InboundPairing, SharedStandardsResolver, StandardsFn, StandardsResolver,
+    StaticStandards,
 };
 pub use error::{Result, TransportError};
 pub use pairing::{Decision, PairingAgent, PairingOutcome, PairingRequest, PairingResponse};

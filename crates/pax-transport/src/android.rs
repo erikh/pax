@@ -388,6 +388,9 @@ impl BluetoothBackend for AndroidBackend {
             can_accept_pairings: false,
             // GATT via JNI is possible but not implemented in this backend yet.
             can_gatt: false,
+            // Android apps cannot reprogram the controller's address (no public
+            // API; it needs privileged/system access), so spoofing is impossible.
+            can_spoof_address: false,
         }
     }
 

@@ -188,6 +188,9 @@ impl BluetoothBackend for BtleplugBackend {
             max_concurrent_pairings: 1,
             can_accept_pairings: false,
             can_gatt: true,
+            // btleplug exposes no portable adapter-address control, so spoofing is
+            // impossible through this backend (use `bluez` on Linux).
+            can_spoof_address: false,
         }
     }
 

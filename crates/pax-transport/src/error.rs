@@ -55,6 +55,12 @@ pub enum TransportError {
         operation: &'static str,
     },
 
+    /// Setting (spoofing) the local adapter's Bluetooth address failed — the
+    /// controller's driver does not support it, the process lacks privilege, or
+    /// the mgmt command was rejected. The string carries the underlying detail.
+    #[error("could not set local address: {0}")]
+    LocalAddress(String),
+
     /// A catch-all for native backend errors, preserving their message.
     #[error("backend error: {0}")]
     Backend(String),

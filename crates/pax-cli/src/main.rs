@@ -13,7 +13,17 @@
 //! pax gatt read AA:.. 180a 2a29  # read a GATT characteristic
 //! pax doctor                     # run a session, print a diagnostics report
 //! pax --backend bluez scan       # pick a backend; --verbose streams events
+//! pax spoof 02:00:00:11:22:33    # impersonate a local address (mock/bluez)
+//! pax --spoof 02:00:00:11:22:33 scan   # scan under an impersonated address
 //! ```
+//!
+//! ## Impersonating a local address
+//!
+//! The global `--spoof <ADDR>` flag sets the local adapter's `BD_ADDR` before the
+//! command runs, so the scan/pair/GATT that follows presents that identity. It is
+//! gated on [`Capabilities::can_spoof_address`](pax_transport::Capabilities): the
+//! `bluez` backend (needs root/`CAP_NET_ADMIN`) and the `mock` backend support it;
+//! selecting `--backend btleplug --spoof …` fails up front with a clear message.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,7 +34,7 @@ use futures::StreamExt as _;
 
 use pax_core::observe::FanOut;
 use pax_core::{
-    ChipsetFamily, ClassOfDevice, CompanyId, ControllerModel, DeviceId, Duration, Observer,
+    BdAddr, ChipsetFamily, ClassOfDevice, CompanyId, ControllerModel, DeviceId, Duration, Observer,
     SharedObserver, TransitEvent, Uuid,
 };
 use pax_diagnostics::{Analyzer, Recorder};
@@ -46,6 +56,11 @@ struct Cli {
     /// Stream the in-transit event log to stderr.
     #[arg(long, global = true)]
     verbose: bool,
+    /// Impersonate this local Bluetooth address before running the command, so
+    /// scans, pairings, and GATT present it as this device's identity. Needs a
+    /// backend that supports it (mock or bluez); other backends error up front.
+    #[arg(long, value_name = "ADDR", global = true)]
+    spoof: Option<String>,
     /// The subcommand to run.
     #[command(subcommand)]
     command: Command,
@@ -98,6 +113,14 @@ enum Command {
         /// Which GATT operation to perform.
         #[command(subcommand)]
         op: GattOp,
+    },
+    /// Set (spoof) the local adapter's Bluetooth address and exit.
+    ///
+    /// On a real adapter (bluez) the controller keeps the address until it is
+    /// reset; use `--spoof` on another command to run that command under it.
+    Spoof {
+        /// The address to present, e.g. `02:00:00:11:22:33`.
+        addr: String,
     },
     /// Run a short session and print a diagnostics report.
     Doctor,
@@ -160,6 +183,15 @@ async fn main() -> anyhow::Result<()> {
     let backend = open_backend(choice, observer).await?;
     let agent = Arc::new(AcceptAllAgent::new());
 
+    // A global `--spoof` applies once, up front, with a capability check — so an
+    // unsupported backend fails before the command does any partial work.
+    if let Some(s) = cli.spoof.as_deref() {
+        spoof_local(&*backend, s).await?;
+        if cli.verbose {
+            eprintln!("local adapter address set to {s}");
+        }
+    }
+
     match cli.command {
         Command::Scan => {
             print!(
@@ -218,6 +250,11 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Command::Gatt { op } => gatt(&*backend, op).await?,
+        Command::Spoof { addr } => {
+            spoof_local(&*backend, &addr).await?;
+            let info = backend.adapter().await?;
+            println!("local adapter address set to {}", info.address);
+        }
         Command::Doctor => {
             // Drive a representative session to populate the event stream.
             let _ = dump_in_range(&*backend, &DiscoveryFilter::new()).await;
@@ -283,6 +320,24 @@ async fn gatt(backend: &dyn BluetoothBackend, op: GattOp) -> anyhow::Result<()> 
             let _ = backend.disconnect(&conn).await;
         }
     }
+    Ok(())
+}
+
+/// Parse and apply a local-address spoof, gating on the backend's capability so
+/// an impossible request (a backend that can't change its address) fails with a
+/// clear message instead of a confusing partial run.
+async fn spoof_local(backend: &dyn BluetoothBackend, addr: &str) -> anyhow::Result<()> {
+    let addr: BdAddr = addr.parse().context("invalid spoof address")?;
+    let caps = backend.capabilities();
+    anyhow::ensure!(
+        caps.can_spoof_address,
+        "the `{}` backend cannot spoof a local address — use --backend bluez (Linux) or --backend mock",
+        caps.kind.name()
+    );
+    backend
+        .set_local_address(addr)
+        .await
+        .with_context(|| format!("setting local address to {addr}"))?;
     Ok(())
 }
 

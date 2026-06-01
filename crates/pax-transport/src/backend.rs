@@ -80,6 +80,15 @@ pub struct Capabilities {
     /// Whether the backend supports GATT (BLE) read / write / notify
     /// ([`BluetoothBackend::gatt_read`] etc.).
     pub can_gatt: bool,
+    /// Whether the backend can **spoof the local adapter's address** —
+    /// i.e. present an arbitrary `BD_ADDR` via
+    /// [`BluetoothBackend::set_local_address`].
+    ///
+    /// `true` means the backend has a mechanism for it (the mock simulates it;
+    /// BlueZ uses the kernel mgmt socket). A real controller may still reject the
+    /// change at run time, but a `false` here means it is *impossible* — query it
+    /// before offering a `--spoof`-style option so you never reach a dead end.
+    pub can_spoof_address: bool,
 }
 
 impl Capabilities {
@@ -358,6 +367,24 @@ pub trait BluetoothBackend: Send + Sync {
     /// Power the adapter on or off.
     async fn set_powered(&self, on: bool) -> Result<()>;
 
+    /// Set (spoof) the local adapter's public Bluetooth address, so subsequent
+    /// scans, pairings, and connections present `addr` as this device's identity.
+    ///
+    /// This is an **adapter-global** change: every operation after it runs under
+    /// `addr` until it is changed again or the controller resets. Only the local
+    /// controller is affected — no remote device is touched.
+    ///
+    /// Default: [`TransportError::Unsupported`]. Backends that can do it advertise
+    /// [`Capabilities::can_spoof_address`] and override this. Prefer the
+    /// capability-checked [`apply_spoof`] (or the `_as` helpers) over calling this
+    /// directly, so an unsupported backend fails fast with a clear error.
+    async fn set_local_address(&self, _addr: BdAddr) -> Result<()> {
+        Err(TransportError::Unsupported {
+            backend: "",
+            operation: "set_local_address",
+        })
+    }
+
     /// Scan for nearby devices, returning those that match `filter`.
     ///
     /// Implementations emit a `DiscoveryStarted` event followed by one
@@ -504,7 +531,77 @@ pub async fn dump_in_range(
     backend: &dyn BluetoothBackend,
     filter: &DiscoveryFilter,
 ) -> Result<String> {
-    let devices = backend.discover(filter).await?;
+    dump_in_range_as(backend, None, filter).await
+}
+
+/// Apply an optional local-address **spoof** before an operation.
+///
+/// `None` is a no-op. `Some(addr)` first checks
+/// [`Capabilities::can_spoof_address`] — returning a clear
+/// [`TransportError::Unsupported`] naming the backend if it cannot — and then
+/// calls [`BluetoothBackend::set_local_address`]. This is the shared,
+/// capability-checked entry point the `_as` scan/connect helpers, the pairing
+/// workflow, and the CLI all use, so an unsupported request fails fast and
+/// uniformly instead of reaching an impossible state.
+///
+/// ```
+/// use pax_transport::{apply_spoof, BluetoothBackend, mock::MockBackend};
+/// use pax_core::BdAddr;
+///
+/// # async fn run() -> Result<(), pax_transport::TransportError> {
+/// let backend = MockBackend::builder().build();
+/// apply_spoof(&backend, None).await?;                              // no-op
+/// apply_spoof(&backend, "02:00:00:11:22:33".parse::<BdAddr>().ok()).await?; // spoof
+/// assert_eq!(backend.adapter().await?.address.to_string(), "02:00:00:11:22:33");
+/// # Ok(()) }
+/// ```
+pub async fn apply_spoof(backend: &dyn BluetoothBackend, spoof: Option<BdAddr>) -> Result<()> {
+    let Some(addr) = spoof else {
+        return Ok(());
+    };
+    let caps = backend.capabilities();
+    if !caps.can_spoof_address {
+        return Err(TransportError::Unsupported {
+            backend: caps.kind.name(),
+            operation: "set_local_address",
+        });
+    }
+    backend.set_local_address(addr).await
+}
+
+/// Scan under an optional spoofed local identity: [`apply_spoof`] then
+/// [`discover`](BluetoothBackend::discover). The scan is emitted under `spoof`
+/// (if any), so probes carry the impersonated address.
+pub async fn discover_as(
+    backend: &dyn BluetoothBackend,
+    spoof: Option<BdAddr>,
+    filter: &DiscoveryFilter,
+) -> Result<Vec<DeviceInfo>> {
+    apply_spoof(backend, spoof).await?;
+    backend.discover(filter).await
+}
+
+/// Connect under an optional spoofed local identity: [`apply_spoof`] then
+/// [`connect`](BluetoothBackend::connect). Use this for GATT and other
+/// per-connection work that should run under the impersonated address.
+pub async fn connect_as(
+    backend: &dyn BluetoothBackend,
+    spoof: Option<BdAddr>,
+    target: DeviceId,
+) -> Result<Connection> {
+    apply_spoof(backend, spoof).await?;
+    backend.connect(target).await
+}
+
+/// Like [`dump_in_range`], but first applies an optional local-address spoof so
+/// the scan runs under the impersonated identity. `None` matches
+/// [`dump_in_range`] exactly.
+pub async fn dump_in_range_as(
+    backend: &dyn BluetoothBackend,
+    spoof: Option<BdAddr>,
+    filter: &DiscoveryFilter,
+) -> Result<String> {
+    let devices = discover_as(backend, spoof, filter).await?;
     let mut out = format!("=== {} device(s) in range ===\n", devices.len());
     for device in &devices {
         out.push('\n');
@@ -540,5 +637,89 @@ mod tests {
     fn backend_kind_names() {
         assert_eq!(BackendKind::Mock.name(), "mock");
         assert_eq!(BackendKind::BlueZ.name(), "bluez");
+    }
+
+    /// A minimal backend that advertises *no* spoofing support and uses the
+    /// default [`BluetoothBackend::set_local_address`]. Only the methods the
+    /// spoofing helpers touch (`capabilities`, `set_local_address`) are
+    /// meaningful; the rest just satisfy the trait.
+    struct NoSpoof;
+
+    #[async_trait]
+    impl BluetoothBackend for NoSpoof {
+        fn name(&self) -> &str {
+            "no-spoof"
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                kind: BackendKind::Btleplug,
+                transports: vec![Transport::Le],
+                can_pair: false,
+                can_push_files: false,
+                max_concurrent_pairings: 1,
+                can_accept_pairings: false,
+                can_gatt: false,
+                can_spoof_address: false,
+            }
+        }
+        async fn adapter(&self) -> Result<AdapterInfo> {
+            Err(TransportError::Backend("n/a".into()))
+        }
+        async fn set_powered(&self, _on: bool) -> Result<()> {
+            Ok(())
+        }
+        async fn discover(&self, _filter: &DiscoveryFilter) -> Result<Vec<DeviceInfo>> {
+            Ok(vec![])
+        }
+        async fn pair(
+            &self,
+            _target: DeviceId,
+            _agent: Arc<dyn PairingAgent>,
+        ) -> Result<PairingOutcome> {
+            Err(TransportError::Backend("n/a".into()))
+        }
+        async fn connect(&self, _target: DeviceId) -> Result<Connection> {
+            Err(TransportError::Backend("n/a".into()))
+        }
+        async fn disconnect(&self, _conn: &Connection) -> Result<()> {
+            Ok(())
+        }
+        async fn push_file(
+            &self,
+            _conn: &Connection,
+            _file: OutboundFile<'_>,
+        ) -> Result<TransferReceipt> {
+            Err(TransportError::Backend("n/a".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_spoof_none_is_a_noop_even_on_unsupported_backend() {
+        // No address requested → never consults the capability, never errors.
+        apply_spoof(&NoSpoof, None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_spoof_on_unsupported_backend_fails_fast() {
+        let addr: BdAddr = "02:00:00:11:22:33".parse().unwrap();
+        let err = apply_spoof(&NoSpoof, Some(addr)).await.unwrap_err();
+        match err {
+            TransportError::Unsupported { backend, operation } => {
+                assert_eq!(backend, "btleplug");
+                assert_eq!(operation, "set_local_address");
+            }
+            other => panic!("expected Unsupported, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_set_local_address_is_unsupported() {
+        let addr: BdAddr = "02:00:00:11:22:33".parse().unwrap();
+        // Calling the trait method directly (bypassing the capability check) still
+        // returns Unsupported from the default impl.
+        assert!(matches!(
+            NoSpoof.set_local_address(addr).await,
+            Err(TransportError::Unsupported { .. })
+        ));
     }
 }

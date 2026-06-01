@@ -81,6 +81,8 @@ impl BluetoothBackend for IosBackend {
             can_accept_pairings: false,
             // CoreBluetooth's core competency — delegated to the inner btleplug.
             can_gatt: true,
+            // iOS gives apps no access to the controller address; impossible.
+            can_spoof_address: false,
         }
     }
 

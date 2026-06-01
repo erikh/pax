@@ -32,3 +32,8 @@ default = []
 bluez = ["pax-transport/bluez"]
 btleplug = ["pax-transport/btleplug"]
 all-backends = ["bluez", "btleplug"]
+# 802.1X / port-auth standards resolvers (Linux only, built on bluez).
+port-auth-nm = ["pax-transport/port-auth-nm"]
+port-auth-wpa = ["pax-transport/port-auth-wpa"]
+# Every Linux-capable feature: both backends plus both port-auth resolvers.
+linux-all = ["all-backends", "port-auth-nm", "port-auth-wpa"]
