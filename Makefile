@@ -1,11 +1,15 @@
 # Makefile for the `pax` Bluetooth toolkit.
 #
 # Primary purpose: build and install the `pax` command-line binary (from the
-# pax-cli crate). The default build is pure Rust with no system dependencies;
-# pass FEATURES to turn on a real hardware backend, e.g.
+# pax-cli crate). By default it installs with the Linux BlueZ backend so the
+# CLI drives real hardware out of the box. This needs the D-Bus development
+# headers at build time (Fedora/Asahi: `sudo dnf install dbus-devel`,
+# Debian/Ubuntu: `sudo apt install libdbus-1-dev`) and a running `bluetoothd`
+# at run time. Override FEATURES to change backends:
 #
-#     make install FEATURES=all-backends     # bluez + btleplug (needs libdbus)
-#     make install FEATURES=btleplug         # cross-platform BLE only
+#     make install FEATURES=all-backends     # bluez + btleplug
+#     make install FEATURES=btleplug         # cross-platform BLE, no system deps
+#     make install FEATURES=                 # mock backend only, pure Rust
 #
 # Install location is chosen by who you are: as root it goes system-wide
 # (/usr/local), otherwise into your home directory (no sudo needed). Override
@@ -27,8 +31,10 @@ BINDIR   = $(DESTDIR)$(PREFIX)/bin
 CLI_CRATE = pax-cli
 BIN       = pax
 
-# Optional cargo features for the CLI (e.g. bluez, btleplug, all-backends).
-FEATURES ?=
+# Cargo features for the CLI. Defaults to the BlueZ backend so a plain
+# `make install` produces a CLI that talks to real hardware. Set to empty
+# (FEATURES=) for the pure-Rust, mock-only build with no system deps.
+FEATURES ?= bluez
 ifeq ($(strip $(FEATURES)),)
 FEATURE_FLAGS =
 else
